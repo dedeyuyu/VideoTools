@@ -187,12 +187,16 @@ class FFmpegWorker(QThread):
                         filter_complex += f"{current_a}{next_a}acrossfade=d={fade_dur}{out_a};"
                         current_a = out_a
             else:
-                concat_v = "".join(v_streams)
                 if self.mute:
+                    concat_v = "".join(v_streams)
                     filter_complex += f"{concat_v}concat=n={len(task_videos)}:v=1:a=0[outv];"
                 else:
-                    concat_a = "".join(a_streams)
-                    filter_complex += f"{concat_v}{concat_a}concat=n={len(task_videos)}:v=1:a=1[outv][outa];"
+                    # ffmpeg concat 要求流必须交错排列：[v0][a0][v1][a1]...
+                    # 不能将所有视频流放前面再跟所有音频流，否则 pad 类型不匹配
+                    interleaved = "".join(
+                        f"{v_streams[k]}{a_streams[k]}" for k in range(len(task_videos))
+                    )
+                    filter_complex += f"{interleaved}concat=n={len(task_videos)}:v=1:a=1[outv][outa];"
 
             # ── Background audio filter chain ────────────────────────────────────
             if has_bg_audio:
