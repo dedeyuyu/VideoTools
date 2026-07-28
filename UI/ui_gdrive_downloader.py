@@ -1,12 +1,13 @@
 """
 ui_gdrive_downloader.py
-谷歌云端视频批量下载模块
+谷歌云端文件批量下载模块
 
 功能：
   - 两列表格（链接 / 自定义命名），支持 Ctrl+V 从 Excel/表格工具粘贴
   - 右键菜单：插入行、删除选中行、清空表格
   - 输出目录选择，使用 QSettings 记住上次路径
   - 后台 yt-dlp 下载线程，实时进度日志
+  - 支持任意文件类型：视频、图片、文档等
 """
 
 import os
@@ -60,23 +61,20 @@ class GDriveWorker(QThread):
 
     # ------------------------------------------------------------------
     def _build_args(self, url: str, name: str) -> list[str]:
-        """构建单条 yt-dlp 命令参数列表。"""
+        """构建单条 yt-dlp 命令参数列表。支持任意文件类型（视频/图片/文档等）。"""
         args = ["yt-dlp", "--newline", "--no-playlist", "--no-update"]
 
-        # ffmpeg 路径
+        # ffmpeg 路径（仅视频合并时需要，其他文件类型不影响）
         if self.ffmpeg_dir and os.path.isdir(self.ffmpeg_dir):
             args += ["--ffmpeg-location", self.ffmpeg_dir]
 
-        # 输出文件名模板：使用用户指定的命名（自动加扩展名）
+        # 输出文件名模板：使用用户指定的命名，自动保留原始扩展名
         safe_name = _sanitize_filename(name) if name.strip() else "%(title)s"
         out_template = os.path.join(self.output_dir, f"{safe_name}.%(ext)s")
         args += ["-o", out_template]
 
-        # 视频格式：优先 mp4，最高画质
-        args += [
-            "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
-            "--merge-output-format", "mp4",
-        ]
+        # 不指定 -f 格式选择器，让 yt-dlp 自动识别文件类型并以原始格式下载
+        # 这样视频、图片、文档等任意 Google Drive 文件都能正常下载
 
         args.append(url)
         return args
@@ -284,11 +282,12 @@ class GDriveDownloaderUI(QWidget):
         main.setSpacing(10)
 
         # ── 说明卡 ─────────────────────────────────────────────────────────
-        card_hint, lay_hint = self._create_card("☁️ 谷歌云端视频批量下载")
+        card_hint, lay_hint = self._create_card("☁️ 谷歌云端文件批量下载")
 
         hint_text = QLabel(
             "在下方表格中粘贴或输入下载任务。"
-            "第一列为 Google Drive 视频链接，第二列为自定义命名（不含扩展名）。\n"
+            "第一列为 Google Drive 链接，第二列为自定义命名（不含扩展名）。\n"
+            "支持 <b>任意文件类型</b>：视频、图片、PDF、文档等，只要链接可以打开就能下载。\n"
             "支持直接从 Excel / 表格工具复制后 <b>Ctrl+V</b> 粘贴到表格；"
             "也可右键插入行手动填写。命名留空将使用原文件标题。"
         )
@@ -298,7 +297,7 @@ class GDriveDownloaderUI(QWidget):
 
         # 链接格式说明
         fmt_label = QLabel(
-            "📌 支持的链接格式：\n"
+            "📌 支持的 Google Drive 链接格式：\n"
             "  • https://drive.google.com/file/d/{FILE_ID}/view\n"
             "  • https://drive.google.com/open?id={FILE_ID}\n"
             "  • https://drive.google.com/uc?id={FILE_ID}"
@@ -336,7 +335,7 @@ class GDriveDownloaderUI(QWidget):
 
         # 表格
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Google Drive 链接", "自定义命名（不含扩展名）"])
+        self.table.setHorizontalHeaderLabels(["Google Drive 文件链接（视频/图片/文档均可）", "自定义命名（不含扩展名）"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
