@@ -40,7 +40,7 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 1.2.1")
+        self.setWindowTitle("视频集成工具 1.2.2")
         self.setMinimumSize(1000, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
