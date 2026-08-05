@@ -29,18 +29,19 @@ from UI.ui_multi_segment import MultiSegmentUI
 from UI.ui_youtube_downloader import YouTubeDownloaderUI
 from UI.ui_auto_screenshot import AutoScreenshotUI
 from UI.ui_gdrive_downloader import GDriveDownloaderUI
+from UI.ui_ffmpeg_downloader_mgr import FFmpegDownloaderDialog, get_ffmpeg_status
 
 class ToolboxApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
         try:
-            myappid = 'mycompany.videotools.1.0.0'
+            myappid = 'mycompany.videotools.1.3.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 1.2.2")
+        self.setWindowTitle("视频集成工具 v1.3.0")
         self.setMinimumSize(1000, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -50,6 +51,7 @@ class ToolboxApp(QMainWindow):
 
         self.setup_ui()
         self.apply_theme()
+        self._update_ffmpeg_btn_style()  # 启动时检测 FFmpeg 状态
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -85,6 +87,13 @@ class ToolboxApp(QMainWindow):
 
         self.btn_nav_video.setChecked(True) 
         nav_layout.addStretch() 
+
+        # FFmpeg 状态按钮
+        self.btn_ffmpeg = QPushButton("⚙️ FFmpeg")
+        self.btn_ffmpeg.setProperty("class", "ActionBtn")
+        self.btn_ffmpeg.setToolTip("管理 FFmpeg — 检测状态 / 一键下载安装")
+        self.btn_ffmpeg.clicked.connect(self._open_ffmpeg_manager)
+        nav_layout.addWidget(self.btn_ffmpeg)
 
         self.btn_theme = QPushButton("切换亮/暗色")
         self.btn_theme.setProperty("class", "ActionBtn")
@@ -128,6 +137,25 @@ class ToolboxApp(QMainWindow):
         for btn in self.nav_buttons:
             btn.setChecked(False)
         active_btn.setChecked(True)
+
+    def _open_ffmpeg_manager(self):
+        """Open the FFmpeg management dialog."""
+        dlg = FFmpegDownloaderDialog(parent=self)
+        dlg.exec()
+        # After the dialog closes, refresh the FFmpeg button style
+        self._update_ffmpeg_btn_style()
+
+    def _update_ffmpeg_btn_style(self):
+        """Show a red badge if FFmpeg is not installed."""
+        status = get_ffmpeg_status()
+        if status["installed"]:
+            self.btn_ffmpeg.setText("⚙️ FFmpeg ✅")
+            self.btn_ffmpeg.setStyleSheet("")
+        else:
+            self.btn_ffmpeg.setText("⚙️ FFmpeg ❌")
+            self.btn_ffmpeg.setStyleSheet(
+                "QPushButton { color: #f43f5e; font-weight: bold; }"
+            )
 
     def toggle_theme(self):
         self.is_dark_mode = not self.is_dark_mode

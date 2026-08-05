@@ -1013,8 +1013,9 @@ class ImageMergerUI(QWidget):
         self.combo_resolution.setCurrentText(self.settings.value("i_resolution", "1080P (1K/推荐)"))
         self.combo_order.setCurrentText(self.settings.value("i_order", "随机合并"))
         self.spin_duration.setValue(self.settings.value("i_duration", 5, type=int))
-        self.check_transition.setChecked(self.settings.value("i_chk_trans", True, type=bool))
-        self.combo_transition.setCurrentText(self.settings.value("i_transition", "淡入淡出 (fade)"))
+        saved_trans = self.settings.value("i_transition", "淡入淡出 (fade)")
+        if self.combo_transition.findText(saved_trans) >= 0:
+            self.combo_transition.setCurrentText(saved_trans)
         self.check_effect.setChecked(self.settings.value("i_chk_effect", True, type=bool))
         self.combo_audio_mode.setCurrentText(self.settings.value("i_audio_mode", "随机分配"))
         self.check_audio_loop.setChecked(self.settings.value("i_audio_loop", True, type=bool))
@@ -1056,7 +1057,6 @@ class ImageMergerUI(QWidget):
         self.settings.setValue("i_resolution", self.combo_resolution.currentText())
         self.settings.setValue("i_order", self.combo_order.currentText())
         self.settings.setValue("i_duration", self.spin_duration.value())
-        self.settings.setValue("i_chk_trans", self.check_transition.isChecked())
         self.settings.setValue("i_transition", self.combo_transition.currentText())
         self.settings.setValue("i_chk_effect", self.check_effect.isChecked())
         self.settings.setValue("i_effect", self.combo_effect.currentText())
@@ -1232,16 +1232,17 @@ class ImageMergerUI(QWidget):
         grid.addWidget(self.spin_duration, 2, 3)
 
         trans_layout = QHBoxLayout()
-        self.check_transition = QCheckBox("转场特效")
-        trans_layout.addWidget(self.check_transition)
+        trans_layout.addWidget(QLabel("转场特效:"))
         self.combo_transition = QComboBox()
         self.combo_transition.addItems([
+            "无转场（直接拼接）",
             "淡入淡出 (fade)", "向左滑动 (slideleft)", "向右滑动 (slideright)",
             "向上滑动 (slideup)", "向下滑动 (slidedown)", "平滑向左 (smoothleft)",
             "直线擦除 (wipeleft)", "对角擦除 (wiperv)", "圆形展开 (circlecrop)",
             "矩形展开 (rectcrop)", "雷达扫描 (radial)", "马赛克 (pixelize)",
             "溶解 (dissolve)", "距离形变 (distance)", "黑场过渡 (fadeblack)"
         ])
+        self.combo_transition.setToolTip("选择'无转场（直接拼接）'时图片之间直接切换，无过渡效果")
         trans_layout.addWidget(self.combo_transition)
         grid.addLayout(trans_layout, 3, 0, 1, 2)
 
@@ -1378,8 +1379,6 @@ class ImageMergerUI(QWidget):
         self.btn_out_path.clicked.connect(self.select_output_dir)
         self.btn_start.clicked.connect(self.start_merge)
         self.btn_stop.clicked.connect(self.stop_merge)
-        self.check_transition.stateChanged.connect(
-            lambda state: self.combo_transition.setEnabled(state == 2))
         self.check_effect.stateChanged.connect(
             lambda state: self.combo_effect.setEnabled(state == 2))
         self.check_irregular.stateChanged.connect(lambda _: self._toggle_irregular_mode())
@@ -1625,7 +1624,13 @@ class ImageMergerUI(QWidget):
         self.btn_stop.setEnabled(True)
         self.progress_bar.setValue(0)
 
-        trans_code = self.combo_transition.currentText().split("(")[-1].strip(")")
+        selected_trans = self.combo_transition.currentText()
+        enable_trans = selected_trans != "无转场（直接拼接）"
+        # 从括号中提取 ffmpeg 转场名称，如 "淡入淡出 (fade)" → "fade"
+        if enable_trans and "(" in selected_trans:
+            trans_code = selected_trans.split("(")[-1].strip(")")
+        else:
+            trans_code = "fade"   # 无转场时该值不会被使用
         eff_code = self.combo_effect.currentText().split("(")[-1].strip(")")
         aspect_ratio = self.combo_aspect_ratio.currentText().split(" ")[0]
         resolution = self.combo_resolution.currentText().split(" ")[0]
@@ -1635,7 +1640,7 @@ class ImageMergerUI(QWidget):
             duration=self.spin_duration.value(),
             aspect_ratio=aspect_ratio,
             resolution=resolution,
-            enable_trans=self.check_transition.isChecked(),
+            enable_trans=enable_trans,
             trans_name=trans_code,
             enable_eff=self.check_effect.isChecked(),
             eff_name=eff_code,

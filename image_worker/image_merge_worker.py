@@ -170,7 +170,7 @@ class ImageMergeWorker(QThread):
                     if eff:
                         chain += f",{eff}"
 
-                chain += f",setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v{idx}];"
+                chain += f",trim=duration={self.duration},setpts=PTS-STARTPTS,setsar=1,format=yuv420p[v{idx}];"
                 filter_complex += chain
                 v_streams.append(f"[v{idx}]")
 

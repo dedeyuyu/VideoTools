@@ -2,6 +2,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 
+output_installer/
+VideoTools-*.zip
+audio_library.json
+
 .env
 .env.*
 *.pem

@@ -86,3 +86,40 @@ print("[DONE] Build complete!")
 print("  App folder :", FINAL_DIR)
 print("  Launch with:", os.path.join(FINAL_DIR, "VideoTools.exe"))
 print("=" * 60)
+
+# ── Step 7: Build Inno Setup installer ───────────────────────────────
+print("\nStep 7: Build Inno Setup installer ...")
+
+ISCC_PATHS = [
+    r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    r"C:\Program Files\Inno Setup 6\ISCC.exe",
+    r"C:\Program Files (x86)\Inno Setup 5\ISCC.exe",
+    r"C:\Program Files\Inno Setup 5\ISCC.exe",
+]
+ISS_FILE  = os.path.join(ROOT, "installer", "VideoTools.iss")
+OUT_DIR   = os.path.join(ROOT, "output_installer")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+iscc = None
+for p in ISCC_PATHS:
+    if os.path.exists(p):
+        iscc = p
+        break
+
+if iscc is None:
+    print("  [WARN] Inno Setup Compiler (ISCC.exe) not found.")
+    print("         Please compile installer\\VideoTools.iss manually.")
+else:
+    print(f"  Using: {iscc}")
+    res = subprocess.run([iscc, ISS_FILE], cwd=ROOT)
+    if res.returncode == 0:
+        # 找到生成的安装包文件
+        for fname in os.listdir(OUT_DIR):
+            if fname.endswith(".exe"):
+                size_mb = os.path.getsize(os.path.join(OUT_DIR, fname)) / (1024 * 1024)
+                print(f"  [OK]  Installer: {fname}  ({size_mb:.1f} MB)")
+        print("  [OK] Installer built successfully!")
+    else:
+        print("  [FAIL] Inno Setup build failed — check the .iss file.")
+
+print("\nAll done!")

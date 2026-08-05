@@ -43,6 +43,7 @@ a = Analysis(
         'UI.ui_youtube_downloader',
         'UI.ui_auto_screenshot',
         'UI.ui_gdrive_downloader',
+        'UI.ui_ffmpeg_downloader_mgr',
         'image_worker.image_merge_worker',
         'image_worker.image_worker',
         'image_worker.ffmpeg_worker',
