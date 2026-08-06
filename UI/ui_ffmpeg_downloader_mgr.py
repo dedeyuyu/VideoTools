@@ -1,4 +1,4 @@
-﻿import os
+import os
 import sys
 import zipfile
 import urllib.request
@@ -11,7 +11,24 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 
-_FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+import ssl
+
+# 下载源列表（按优先级顺序尝试）
+# 1. BtbN GitHub Releases —— GitHub 托管，SSL 永远有效
+# 2. gyan.dev —— FFmpeg 官网推荐来源，禁用 SSL 验证作为备用
+_FFMPEG_SOURCES = [
+    {
+        "name": "GitHub (BtbN)",
+        "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+        "verify_ssl": True,
+    },
+    {
+        "name": "gyan.dev (fallback)",
+        "url": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "verify_ssl": False,   # SSL 证书可能过期，禁用验证作为备用
+    },
+]
+
 
 
 def _get_install_root() -> str:
@@ -49,15 +66,40 @@ class DownloadThread(QThread):
         import tempfile, shutil
         tmp_zip = None
         try:
-            self.progress.emit(0, "正在连接下载服务器...")
-            try:
-                req = urllib.request.Request(
-                    _FFMPEG_URL,
-                    headers={"User-Agent": "Mozilla/5.0 VideoTools/1.3.0"}
+            resp = None
+            used_source = None
+
+            for source in _FFMPEG_SOURCES:
+                if self._stop:
+                    self.finished.emit(False, "用户已取消下载。")
+                    return
+                self.progress.emit(0, f"正在连接 {source['name']}...")
+                try:
+                    req = urllib.request.Request(
+                        source["url"],
+                        headers={"User-Agent": "Mozilla/5.0 VideoTools/1.3.0"}
+                    )
+                    if source["verify_ssl"]:
+                        ctx = ssl.create_default_context()
+                    else:
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname = False
+                        ctx.verify_mode = ssl.CERT_NONE
+                    resp = urllib.request.urlopen(req, timeout=60, context=ctx)
+                    used_source = source
+                    self.progress.emit(2, f"已连接到 {source['name']}，准备下载...")
+                    break
+                except Exception as conn_err:
+                    self.progress.emit(0, f"{source['name']} 连接失败，尝试下一个源...")
+                    continue
+
+            if resp is None or used_source is None:
+                self.finished.emit(
+                    False,
+                    "所有下载源均连接失败，请检查网络连接。\n\n"
+                    "如果网络正常但仍失败，可手动下载 ffmpeg.exe 和 ffprobe.exe\n"
+                    "并放入软件安装目录的 ffmpeg\\ 子文件夹中。"
                 )
-                resp = urllib.request.urlopen(req, timeout=30)
-            except urllib.error.URLError as e:
-                self.finished.emit(False, f"无法连接下载服务器：\n{e}\n\n请检查网络连接后重试。")
                 return
 
             total = int(resp.headers.get("Content-Length", 0))
@@ -219,7 +261,7 @@ class FFmpegDownloaderDialog(QDialog):
 
         lo.addStretch()
 
-        src_lbl = QLabel("下载源：gyan.dev（FFmpeg 官网推荐的 Windows 构建，约 90 MB）")
+        src_lbl = QLabel("Download: GitHub (BtbN) / gyan.dev (fallback, SSL bypass)")
         src_lbl.setStyleSheet("color: #4b5563; font-size: 9pt;")
         lo.addWidget(src_lbl)
 
