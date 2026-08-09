@@ -286,6 +286,22 @@ class VideoMergerUI(QWidget):
         loop_row.addWidget(self.lbl_loop_summary, 1)
         layout_params.addLayout(loop_row)
 
+        # ── 按文件名合并模式行 ────────────────────────────────────
+        fname_row = QHBoxLayout()
+        fname_row.setSpacing(10)
+        self.check_filename_mode = QCheckBox("🗂 按文件名合并")
+        self.check_filename_mode.setToolTip(
+            "开启后，根据视频文件名自动分组并按编号顺序合并。\n"
+            "命名格式：「识别码-数字编号」，例如 A-1、A-2、邓-1、AB-3\n"
+            "相同识别码的视频会合并为一个，按数字升序排列。\n"
+            "合并数量、输出数量、合并顺序将失效，尺寸/分辨率/转场仍有效。"
+        )
+        fname_row.addWidget(self.check_filename_mode)
+        self.lbl_filename_summary = QLabel("（未开启）")
+        self.lbl_filename_summary.setStyleSheet("color: #4b5563; font-size: 9pt;")
+        fname_row.addWidget(self.lbl_filename_summary, 1)
+        layout_params.addLayout(fname_row)
+
         main_layout.addWidget(card_params)
 
         # ── 音频背景音乐卡 (仅当勾选去掉声音时显示) ─────────────────────────
@@ -483,6 +499,8 @@ class VideoMergerUI(QWidget):
         # 循环模式
         self.check_loop_mode.stateChanged.connect(lambda _: self._toggle_loop_mode())
         self.btn_loop_config.clicked.connect(self._open_loop_dialog)
+        # 按文件名合并模式
+        self.check_filename_mode.stateChanged.connect(lambda _: self._toggle_filename_mode())
         # 音频库管理
         self.btn_add_audio.clicked.connect(self._add_audio_files)
         self.btn_add_audio_folder.clicked.connect(self._add_audio_folder)
@@ -530,8 +548,15 @@ class VideoMergerUI(QWidget):
             self.check_loop_mode.setChecked(False)
             self.check_loop_mode.blockSignals(False)
             self._toggle_loop_mode()
-        self.spin_merge_count.setEnabled(not is_irr and not self.check_loop_mode.isChecked())
-        self.spin_output_count.setEnabled(not is_irr and not self.check_loop_mode.isChecked())
+        # 与按文件名模式互斥
+        if is_irr and self.check_filename_mode.isChecked():
+            self.check_filename_mode.blockSignals(True)
+            self.check_filename_mode.setChecked(False)
+            self.check_filename_mode.blockSignals(False)
+            self._update_filename_summary()
+        is_any = is_irr or self.check_loop_mode.isChecked() or self.check_filename_mode.isChecked()
+        self.spin_merge_count.setEnabled(not is_any)
+        self.spin_output_count.setEnabled(not is_any)
         self.btn_irregular_config.setEnabled(is_irr)
 
     def _open_irregular_dialog(self):
@@ -563,11 +588,16 @@ class VideoMergerUI(QWidget):
             self.check_irregular.setChecked(False)
             self.check_irregular.blockSignals(False)
             self.btn_irregular_config.setEnabled(False)
-        is_any_special = is_loop or self.check_irregular.isChecked()
-        self.spin_merge_count.setEnabled(not is_any_special)
-        self.spin_output_count.setEnabled(not is_any_special)
-        # 循环模式强制按顺序合并，禁用合并顺序下拉
-        self.combo_order.setEnabled(not is_loop)
+        # 与按文件名模式互斥
+        if is_loop and self.check_filename_mode.isChecked():
+            self.check_filename_mode.blockSignals(True)
+            self.check_filename_mode.setChecked(False)
+            self.check_filename_mode.blockSignals(False)
+            self._update_filename_summary()
+        is_any = is_loop or self.check_irregular.isChecked() or self.check_filename_mode.isChecked()
+        self.spin_merge_count.setEnabled(not is_any)
+        self.spin_output_count.setEnabled(not is_any)
+        self.combo_order.setEnabled(not is_loop and not self.check_filename_mode.isChecked())
         self.btn_loop_config.setEnabled(is_loop)
 
     def _open_loop_dialog(self):
@@ -588,6 +618,65 @@ class VideoMergerUI(QWidget):
         else:
             self.lbl_loop_summary.setText("（未配置）")
             self.lbl_loop_summary.setStyleSheet("color: #4b5563; font-size: 9pt;")
+
+    # ── 按文件名合并模式 ─────────────────────────────────────────────────
+
+    def _toggle_filename_mode(self):
+        is_fn = self.check_filename_mode.isChecked()
+        if is_fn and self.check_irregular.isChecked():
+            self.check_irregular.blockSignals(True)
+            self.check_irregular.setChecked(False)
+            self.check_irregular.blockSignals(False)
+            self.btn_irregular_config.setEnabled(False)
+        if is_fn and self.check_loop_mode.isChecked():
+            self.check_loop_mode.blockSignals(True)
+            self.check_loop_mode.setChecked(False)
+            self.check_loop_mode.blockSignals(False)
+            self.btn_loop_config.setEnabled(False)
+        is_any = is_fn or self.check_irregular.isChecked() or self.check_loop_mode.isChecked()
+        self.spin_merge_count.setEnabled(not is_any)
+        self.spin_output_count.setEnabled(not is_any)
+        self.combo_order.setEnabled(not is_fn and not self.check_loop_mode.isChecked())
+        self._update_filename_summary()
+
+    def _update_filename_summary(self):
+        if not self.check_filename_mode.isChecked():
+            self.lbl_filename_summary.setText("（未开启）")
+            self.lbl_filename_summary.setStyleSheet("color: #4b5563; font-size: 9pt;")
+            return
+        all_videos = [self.file_list.item(i).text() for i in range(self.file_list.count())]
+        groups = self._parse_filename_groups(all_videos)
+        if groups:
+            self.lbl_filename_summary.setText(
+                f"共识别出 {len(groups)} 组，将生成 {len(groups)} 个视频"
+            )
+            self.lbl_filename_summary.setStyleSheet(
+                "color: #f43f5e; font-size: 9pt; font-weight: bold;"
+            )
+        else:
+            self.lbl_filename_summary.setText("未识别到有效分组，请检查文件名格式（识别码-编号）")
+            self.lbl_filename_summary.setStyleSheet("color: #f59e0b; font-size: 9pt;")
+
+    def _parse_filename_groups(self, video_paths: list) -> dict:
+        """
+        解析视频文件列表，按「识别码-数字编号」格式分组并排序。
+        返回: {identifier: [path_sorted_by_number, ...]} 按识别码字典序排序
+        """
+        import re
+        groups: dict = {}
+        pattern = re.compile(r'^(.+)-(\d+)$')
+        for path in video_paths:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            m = pattern.match(stem)
+            if m:
+                identifier = m.group(1)
+                number = int(m.group(2))
+                if identifier not in groups:
+                    groups[identifier] = []
+                groups[identifier].append((number, path))
+        sorted_groups = dict(sorted(groups.items()))
+        result = {k: [p for _, p in sorted(v)] for k, v in sorted_groups.items()}
+        return result
 
     # ── 音频库管理 ─────────────────────────────────────────────────────────
 
@@ -813,6 +902,55 @@ class VideoMergerUI(QWidget):
         merge_mode = self.combo_order.currentText()
 
         # ── 确定任务列表 ──────────────────────────────────────────────────
+        # 按文件名合并模式：直接解析分组并启动
+        if self.check_filename_mode.isChecked():
+            groups = self._parse_filename_groups(all_videos)
+            if not groups:
+                QMessageBox.warning(self, "警告",
+                    "按文件名合并模式已开启，但未识别出有效分组。\n"
+                    "请确保视频文件名格式为：「识别码-数字编号」，例如 A-1、张三-2")
+                return
+            tasks = []
+            current_seq = 1
+            for identifier, sorted_paths in groups.items():
+                while True:
+                    raw_path = os.path.join(self.output_dir, f"{identifier}_{current_seq:03d}.mp4")
+                    output_file = os.path.normpath(raw_path)
+                    if not os.path.exists(output_file): break
+                    current_seq += 1
+                tasks.append({"videos": sorted_paths, "output_file": output_file})
+                current_seq += 1
+            use_music = self.check_add_music.isChecked()
+            audio_assignments = self._get_audio_for_tasks(len(tasks)) if use_music and self.selected_audios else [None] * len(tasks)
+            for task, ap in zip(tasks, audio_assignments):
+                task["audio_path"] = ap
+                if ap:
+                    params = self.audio_library.get_params_for_path(ap)
+                    task["audio_skip_start"] = params["skip_start"]
+                    task["audio_fade_in"]    = params["fade_in"]
+                else:
+                    task["audio_skip_start"] = 0.0
+                    task["audio_fade_in"]    = 0.0
+            self.btn_start.setEnabled(False)
+            self.btn_stop.setEnabled(True)
+            self.progress_bar.setValue(0)
+            self.worker = FFmpegWorker(
+                tasks=tasks,
+                transition=self.combo_transition.currentText(),
+                aspect_ratio=self.combo_aspect_ratio.currentText().split(" ")[0],
+                resolution=self.combo_resolution.currentText().split(" ")[0],
+                speed=self.spin_speed.value(),
+                mute=self.check_mute.isChecked(),
+                ffmpeg_path=ffmpeg_exe,
+                ffprobe_path=ffprobe_exe,
+                audio_loop=self.check_audio_loop.isChecked(),
+                audio_volume=self.spin_audio_volume.value(),
+            )
+            self.worker.progress.connect(self.update_progress)
+            self.worker.finished.connect(self.task_finished)
+            self.worker.start()
+            return
+
         # 不规则模式：使用自定义片段数列表
         if self.check_irregular.isChecked():
             if not self.irregular_segments:
@@ -830,6 +968,7 @@ class VideoMergerUI(QWidget):
             segment_list = None   # 循环模式单独处理
         else:
             segment_list = [merge_count] * output_count
+
 
         tasks = []
         current_seq = 1

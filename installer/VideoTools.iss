@@ -1,12 +1,12 @@
-﻿; ============================================================
-;  VideoTools v1.3.0 — Inno Setup 安装脚本
+; ============================================================
+;  VideoTools v1.3.2 — Inno Setup 安装脚本
 ;  安装目录: {localappdata}\VideoTools  (无需管理员权限)
 ;  设置保存: Windows 注册表 (QSettings 天然持久化，更新后保留)
 ;  ffmpeg  : 安装时跳过 ffmpeg\ 目录，避免覆盖用户已下载的版本
 ; ============================================================
 
 #define MyAppName      "视频集成工具"
-#define MyAppVersion   "1.3.0"
+#define MyAppVersion   "1.3.2"
 #define MyAppPublisher "VideoTools"
 #define MyAppExeName   "VideoTools.exe"
 #define MyAppURL       "https://github.com"
