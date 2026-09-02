@@ -39,12 +39,12 @@ class ToolboxApp(QMainWindow):
     def __init__(self):
         super().__init__()
         try:
-            myappid = 'mycompany.videotools.1.3.0'
+            myappid = 'mycompany.videotools.1.4.0'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.3.0")
+        self.setWindowTitle("视频集成工具 v1.4.0")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -289,7 +289,7 @@ class ToolboxApp(QMainWindow):
         self.settings.setValue("is_dark_mode", self.is_dark_mode)
         self.video_tool.save_settings()
         self.img_merge_tool.save_settings()
-        self.copyright_tool.save_settings()   # ← NEW
+        self.copyright_tool.save_settings()
         self.image_tool.save_settings()
         self.multi_segment_tool.save_settings()
         self.youtube_tool.save_settings()
@@ -298,6 +298,24 @@ class ToolboxApp(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    # ── 单实例保护（防止多开卡死）──────────────────────────────────────────
+    # 使用 Windows 命名互斥量，确保全局只有一个实例运行
+    _MUTEX_NAME = "Global\\VideoToolbox_SingleInstance_v2"
+    _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    _last_error = ctypes.windll.kernel32.GetLastError()
+    if _last_error == 183:  # ERROR_ALREADY_EXISTS — 已有实例在运行
+        # 需要先创建 QApplication 才能显示对话框
+        _tmp_app = QApplication(sys.argv)
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.warning(
+            None,
+            "软件已在运行",
+            "「视频集成工具」已经在运行中，请勿重复打开。\n\n"
+            "请检查任务栏或系统托盘。",
+        )
+        sys.exit(0)
+    # ────────────────────────────────────────────────────────────────────────
+
     app = QApplication(sys.argv)
     window = ToolboxApp()
     window.show()
