@@ -65,7 +65,7 @@ class ToolboxApp(QMainWindow):
 
         self.nav_bar = QFrame()
         self.nav_bar.setObjectName("NavBar")
-        self.nav_bar.setFixedHeight(78)
+        self.nav_bar.setFixedHeight(88)
         nav_layout = QHBoxLayout(self.nav_bar)
         nav_layout.setContentsMargins(20, 0, 12, 0)
         nav_layout.setSpacing(10)
@@ -95,13 +95,16 @@ class ToolboxApp(QMainWindow):
         nav_btn_container = QWidget()
         nav_btn_container.setObjectName("NavBtnContainer")
         nav_btn_inner = QHBoxLayout(nav_btn_container)
-        nav_btn_inner.setContentsMargins(0, 0, 0, 0)
-        nav_btn_inner.setSpacing(8)
+        nav_btn_inner.setContentsMargins(4, 4, 4, 4)
+        nav_btn_inner.setSpacing(6)
         for btn in self._all_nav_btns:
             btn.setCheckable(True)
             btn.setProperty("class", "NavBtn")
+            btn.setFixedHeight(62)          # 明确高度，确保文字完整显示
+            btn.setMinimumWidth(130)        # 足够宽度显示中文名称
             nav_btn_inner.addWidget(btn)
         nav_btn_inner.addStretch()
+        nav_btn_container.setFixedHeight(70)   # 容器高度 = 按钮高度 + 上下 padding
 
         # 滚动区：仅横向滚动，纵向不滚动，无边框
         nav_scroll = QScrollArea()
@@ -111,6 +114,7 @@ class ToolboxApp(QMainWindow):
         nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
         nav_scroll.setObjectName("NavScroll")
+        nav_scroll.setFixedHeight(70)          # 与容器等高，不发生裁剪
 
         self.btn_nav_video.setChecked(True)
         nav_layout.addWidget(nav_scroll, 1)   # stretch=1，占满剩余空间
@@ -220,7 +224,7 @@ class ToolboxApp(QMainWindow):
                 QScrollArea#NavScroll QScrollBar::handle:horizontal { background: #4b5563; border-radius: 2px; min-width: 20px; }
                 QScrollArea#NavScroll QScrollBar::add-line:horizontal, QScrollArea#NavScroll QScrollBar::sub-line:horizontal { width: 0; }
                 QScrollArea#NavScroll QScrollBar::add-page:horizontal, QScrollArea#NavScroll QScrollBar::sub-page:horizontal { background: none; }
-                QPushButton.NavBtn { background: transparent; border: none; color: #9ca3af; padding: 10px 16px; font-weight: bold; font-size: 10pt; border-radius: 6px; min-height: 52px; white-space: nowrap; }
+                QPushButton.NavBtn { background: transparent; border: none; color: #9ca3af; padding: 6px 14px; font-weight: bold; font-size: 10pt; border-radius: 6px; }
                 QPushButton.NavBtn:hover { background-color: #2b303b; color: #ffffff; }
                 QPushButton.NavBtn:checked { background-color: #f43f5e; color: #ffffff; } 
                 QFrame.Card { background-color: #222631; border-radius: 10px; border: 1px solid #2b303b; }
@@ -258,7 +262,7 @@ class ToolboxApp(QMainWindow):
                 QScrollArea#NavScroll QScrollBar::handle:horizontal { background: #d1d5db; border-radius: 2px; min-width: 20px; }
                 QScrollArea#NavScroll QScrollBar::add-line:horizontal, QScrollArea#NavScroll QScrollBar::sub-line:horizontal { width: 0; }
                 QScrollArea#NavScroll QScrollBar::add-page:horizontal, QScrollArea#NavScroll QScrollBar::sub-page:horizontal { background: none; }
-                QPushButton.NavBtn { background: transparent; border: none; color: #6b7280; padding: 10px 16px; font-weight: bold; font-size: 10pt; border-radius: 6px; min-height: 52px; white-space: nowrap; }
+                QPushButton.NavBtn { background: transparent; border: none; color: #6b7280; padding: 6px 14px; font-weight: bold; font-size: 10pt; border-radius: 6px; }
                 QPushButton.NavBtn:hover { background-color: #f3f4f6; color: #111827; }
                 QPushButton.NavBtn:checked { background-color: #3b82f6; color: #ffffff; } 
                 QFrame.Card { background-color: #ffffff; border-radius: 10px; border: 1px solid #e5e7eb; }
