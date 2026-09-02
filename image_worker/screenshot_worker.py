@@ -2,6 +2,7 @@
 """
 后台工作线程：链接批量下载 → 分帧截图
 支持可选保存视频文件 / 提取并保存音频文件
+支持 Cookie 登录（自动重试 / 始终使用）
 """
 
 import os
@@ -36,6 +37,8 @@ class ScreenshotWorker(QThread):
         save_video:      bool,
         save_audio:      bool,
         ffmpeg_dir:      str,
+        cookie_file:     str = "",      # Cookie .txt 文件路径（Netscape 格式）
+        cookie_mode:     str = "none",  # "none" / "auto" / "always"
     ):
         super().__init__()
         self.urls             = urls
@@ -46,6 +49,8 @@ class ScreenshotWorker(QThread):
         self.save_video       = save_video
         self.save_audio       = save_audio
         self.ffmpeg_dir       = ffmpeg_dir          # 包含 ffmpeg.exe 的目录
+        self.cookie_file      = cookie_file          # Cookie 文件路径
+        self.cookie_mode      = cookie_mode          # Cookie 使用模式
         self._stop_event      = threading.Event()
         self._current_proc    = None                # 当前正在运行的子进程
 
@@ -81,10 +86,11 @@ class ScreenshotWorker(QThread):
 
     # ── 下载 ──────────────────────────────────────────────────────────────
 
-    def _download_video(self, url: str, temp_dir: str):
+    def _download_video(self, url: str, temp_dir: str, cookie_file: str = ""):
         """
         使用 yt-dlp CLI 下载视频，返回下载后的文件路径（字符串），失败返回 None。
         下载过程中实时发送日志（进度行）。
+        可选传入 cookie_file 覆盖实例的 cookie_file。
         """
         out_template = os.path.join(temp_dir, "%(id)s.%(ext)s")
         args = [
@@ -98,6 +104,11 @@ class ScreenshotWorker(QThread):
         # 让 yt-dlp 使用项目内的 ffmpeg
         if self.ffmpeg_dir and os.path.isdir(self.ffmpeg_dir):
             args += ["--ffmpeg-location", self.ffmpeg_dir]
+
+        # 加入 Cookie 参数
+        effective_cookie = cookie_file or ""
+        if effective_cookie and os.path.isfile(effective_cookie):
+            args += ["--cookies", effective_cookie]
 
         args.append(url)
 
@@ -269,13 +280,23 @@ class ScreenshotWorker(QThread):
             output_folder = os.path.join(self.base_path, folder_name)
             os.makedirs(output_folder, exist_ok=True)
 
-            # ── 下载 ──────────────────────────────────────────────────
+            # ── 下载（含 Cookie 重试逻辑） ────────────────────────────
             self._log("    ⏬ 正在下载视频...")
-            video_path = self._download_video(url, temp_dir)
+
+            if self.cookie_mode == "always" and self.cookie_file:
+                # 始终带 Cookie 下载
+                self._log("    🍪 使用 Cookie 下载...")
+                video_path = self._download_video(url, temp_dir, cookie_file=self.cookie_file)
+            else:
+                # 先不带 Cookie 尝试
+                video_path = self._download_video(url, temp_dir)
+                if video_path is None and self.cookie_mode == "auto" and self.cookie_file:
+                    # 失败后用 Cookie 重试
+                    self._log("    🍪 首次下载失败，正在使用 Cookie 重试...")
+                    video_path = self._download_video(url, temp_dir, cookie_file=self.cookie_file)
 
             if self._stop_event.is_set():
                 self._log("🛑 下载完成后检测到停止指令，中断。")
-                # 清理刚下载的文件
                 if video_path and os.path.exists(video_path):
                     try:
                         os.remove(video_path)

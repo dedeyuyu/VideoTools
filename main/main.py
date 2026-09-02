@@ -16,12 +16,12 @@ def resource_path(relative_path):
     return os.path.join(root_dir, relative_path)
 # ========================================================
 
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout, 
-                             QStackedWidget, QVBoxLayout, QPushButton, QFrame, QLabel)
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
+                             QStackedWidget, QVBoxLayout, QPushButton, QFrame,
+                             QLabel, QScrollArea)
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QIcon
 
-# 修改：加上 "UI." 前缀来导入界面文件
 from UI.ui import VideoMergerUI
 from UI.ui_image_merger import ImageMergerUI
 from UI.ui_image_cropper import ImageCropperUI
@@ -29,7 +29,10 @@ from UI.ui_multi_segment import MultiSegmentUI
 from UI.ui_youtube_downloader import YouTubeDownloaderUI
 from UI.ui_auto_screenshot import AutoScreenshotUI
 from UI.ui_gdrive_downloader import GDriveDownloaderUI
-from UI.ui_ffmpeg_downloader_mgr import FFmpegDownloaderDialog, get_ffmpeg_status
+from UI.ui_copyright_processor import CopyrightProcessorUI
+from UI.ui_ffmpeg_downloader_mgr import (FFmpegDownloaderDialog, get_ffmpeg_status,
+                                          get_opencv_status, get_ytdlp_status,
+                                          get_mediapipe_status, get_face_detection_status)
 
 class ToolboxApp(QMainWindow):
 
@@ -42,16 +45,16 @@ class ToolboxApp(QMainWindow):
             pass
 
         self.setWindowTitle("视频集成工具 v1.3.0")
-        self.setMinimumSize(1000, 750)
+        self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
-        # 1. 初始化设置管理器，读取深色模式偏好
+        # 初始化设置管理器，读取深色模式偏好
         self.settings = QSettings("MyCompany", "VideoToolbox")
         self.is_dark_mode = self.settings.value("is_dark_mode", True, type=bool)
 
         self.setup_ui()
         self.apply_theme()
-        self._update_ffmpeg_btn_style()  # 启动时检测 FFmpeg 状态
+        self._update_components_btn_style()  # 启动时检测组件状态
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -62,38 +65,63 @@ class ToolboxApp(QMainWindow):
 
         self.nav_bar = QFrame()
         self.nav_bar.setObjectName("NavBar")
-        self.nav_bar.setFixedHeight(60)
+        self.nav_bar.setFixedHeight(78)
         nav_layout = QHBoxLayout(self.nav_bar)
-        nav_layout.setContentsMargins(20, 0, 20, 0)
-        nav_layout.setSpacing(15)
+        nav_layout.setContentsMargins(20, 0, 12, 0)
+        nav_layout.setSpacing(10)
 
         logo_label = QLabel("🎬 视频集成工具")
         logo_label.setObjectName("LogoText")
         nav_layout.addWidget(logo_label)
-        nav_layout.addSpacing(20)
+        nav_layout.addSpacing(10)
 
-        self.btn_nav_video = QPushButton("🚀 视频合并与转场")
-        self.btn_nav_img_merge = QPushButton("✨ 图片合并成视频") 
-        self.btn_nav_image = QPushButton("🖼️ 图片批量裁剪")
-        self.btn_nav_multi = QPushButton("🎞️ 多片段合成")
-        self.btn_nav_youtube = QPushButton("📥 YouTube下载")
+        # ── 导航按钮（包裹在 QScrollArea 中，超出宽度时横向滚动）──────────
+        self.btn_nav_video      = QPushButton("🚀 视频合并与转场")
+        self.btn_nav_img_merge  = QPushButton("✨ 图片合并成视频")
+        self.btn_nav_copyright  = QPushButton("🎨 处理版权图片")
+        self.btn_nav_image      = QPushButton("🖼️ 图片批量裁剪")
+        self.btn_nav_multi      = QPushButton("🎞️ 多片段合成")
+        self.btn_nav_youtube    = QPushButton("📥 YouTube下载")
         self.btn_nav_screenshot = QPushButton("📸 链接截图")
-        self.btn_nav_gdrive = QPushButton("☁️ 云盘下载")
-        
-        for btn in [self.btn_nav_video, self.btn_nav_img_merge, self.btn_nav_image, self.btn_nav_multi, self.btn_nav_youtube, self.btn_nav_screenshot, self.btn_nav_gdrive]:
+        self.btn_nav_gdrive     = QPushButton("☁️ 云盘下载")
+
+        self._all_nav_btns = [
+            self.btn_nav_video, self.btn_nav_img_merge, self.btn_nav_copyright,
+            self.btn_nav_image, self.btn_nav_multi, self.btn_nav_youtube,
+            self.btn_nav_screenshot, self.btn_nav_gdrive,
+        ]
+
+        # 内部容器：按钮保持自然宽度，不被压缩
+        nav_btn_container = QWidget()
+        nav_btn_container.setObjectName("NavBtnContainer")
+        nav_btn_inner = QHBoxLayout(nav_btn_container)
+        nav_btn_inner.setContentsMargins(0, 0, 0, 0)
+        nav_btn_inner.setSpacing(8)
+        for btn in self._all_nav_btns:
             btn.setCheckable(True)
             btn.setProperty("class", "NavBtn")
-            nav_layout.addWidget(btn)
+            nav_btn_inner.addWidget(btn)
+        nav_btn_inner.addStretch()
 
-        self.btn_nav_video.setChecked(True) 
-        nav_layout.addStretch() 
+        # 滚动区：仅横向滚动，纵向不滚动，无边框
+        nav_scroll = QScrollArea()
+        nav_scroll.setWidget(nav_btn_container)
+        nav_scroll.setWidgetResizable(False)          # 保持按钮自然宽度
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        nav_scroll.setObjectName("NavScroll")
 
-        # FFmpeg 状态按钮
-        self.btn_ffmpeg = QPushButton("⚙️ FFmpeg")
-        self.btn_ffmpeg.setProperty("class", "ActionBtn")
-        self.btn_ffmpeg.setToolTip("管理 FFmpeg — 检测状态 / 一键下载安装")
-        self.btn_ffmpeg.clicked.connect(self._open_ffmpeg_manager)
-        nav_layout.addWidget(self.btn_ffmpeg)
+        self.btn_nav_video.setChecked(True)
+        nav_layout.addWidget(nav_scroll, 1)   # stretch=1，占满剩余空间
+
+        # ── 右侧功能按钮 ────────────────────────────────────────────────
+        # 「下载必要组件」（原 FFmpeg 按钮，现在涵盖所有必要组件）
+        self.btn_components = QPushButton("📦 下载必要组件")
+        self.btn_components.setProperty("class", "ActionBtn")
+        self.btn_components.setToolTip("管理必要组件 — FFmpeg / opencv-python\n检测状态 / 一键下载安装")
+        self.btn_components.clicked.connect(self._open_components_manager)
+        nav_layout.addWidget(self.btn_components)
 
         self.btn_theme = QPushButton("切换亮/暗色")
         self.btn_theme.setProperty("class", "ActionBtn")
@@ -102,35 +130,41 @@ class ToolboxApp(QMainWindow):
 
         self.main_layout.addWidget(self.nav_bar)
 
+        # ── 页面容器 ─────────────────────────────────────────────────────
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.setContentsMargins(20, 20, 20, 20)
-        
-        self.video_tool = VideoMergerUI()
-        self.img_merge_tool = ImageMergerUI()
-        self.image_tool = ImageCropperUI()
+
+        self.video_tool      = VideoMergerUI()
+        self.img_merge_tool  = ImageMergerUI()
+        self.copyright_tool  = CopyrightProcessorUI()   # ← NEW
+        self.image_tool      = ImageCropperUI()
         self.multi_segment_tool = MultiSegmentUI()
-        self.youtube_tool = YouTubeDownloaderUI()
+        self.youtube_tool    = YouTubeDownloaderUI()
         self.screenshot_tool = AutoScreenshotUI()
-        self.gdrive_tool = GDriveDownloaderUI()
-        
-        self.stacked_widget.addWidget(self.video_tool)
-        self.stacked_widget.addWidget(self.img_merge_tool)
-        self.stacked_widget.addWidget(self.image_tool)
-        self.stacked_widget.addWidget(self.multi_segment_tool)
-        self.stacked_widget.addWidget(self.youtube_tool)
-        self.stacked_widget.addWidget(self.screenshot_tool)
-        self.stacked_widget.addWidget(self.gdrive_tool)
+        self.gdrive_tool     = GDriveDownloaderUI()
+
+        # 按索引顺序添加（必须与 nav 按钮顺序一致）
+        self.stacked_widget.addWidget(self.video_tool)          # 0
+        self.stacked_widget.addWidget(self.img_merge_tool)      # 1
+        self.stacked_widget.addWidget(self.copyright_tool)      # 2  ← NEW
+        self.stacked_widget.addWidget(self.image_tool)          # 3
+        self.stacked_widget.addWidget(self.multi_segment_tool)  # 4
+        self.stacked_widget.addWidget(self.youtube_tool)        # 5
+        self.stacked_widget.addWidget(self.screenshot_tool)     # 6
+        self.stacked_widget.addWidget(self.gdrive_tool)         # 7
 
         self.main_layout.addWidget(self.stacked_widget)
 
-        self.btn_nav_video.clicked.connect(lambda: self.switch_tab(0, self.btn_nav_video))
-        self.btn_nav_img_merge.clicked.connect(lambda: self.switch_tab(1, self.btn_nav_img_merge))
-        self.btn_nav_image.clicked.connect(lambda: self.switch_tab(2, self.btn_nav_image))
-        self.btn_nav_multi.clicked.connect(lambda: self.switch_tab(3, self.btn_nav_multi))
-        self.btn_nav_youtube.clicked.connect(lambda: self.switch_tab(4, self.btn_nav_youtube))
-        self.btn_nav_screenshot.clicked.connect(lambda: self.switch_tab(5, self.btn_nav_screenshot))
-        self.btn_nav_gdrive.clicked.connect(lambda: self.switch_tab(6, self.btn_nav_gdrive))
-        self.nav_buttons = [self.btn_nav_video, self.btn_nav_img_merge, self.btn_nav_image, self.btn_nav_multi, self.btn_nav_youtube, self.btn_nav_screenshot, self.btn_nav_gdrive]
+        # ── 导航点击绑定 ─────────────────────────────────────────────────
+        self.btn_nav_video.clicked.connect(      lambda: self.switch_tab(0, self.btn_nav_video))
+        self.btn_nav_img_merge.clicked.connect(  lambda: self.switch_tab(1, self.btn_nav_img_merge))
+        self.btn_nav_copyright.clicked.connect(  lambda: self.switch_tab(2, self.btn_nav_copyright))
+        self.btn_nav_image.clicked.connect(      lambda: self.switch_tab(3, self.btn_nav_image))
+        self.btn_nav_multi.clicked.connect(      lambda: self.switch_tab(4, self.btn_nav_multi))
+        self.btn_nav_youtube.clicked.connect(    lambda: self.switch_tab(5, self.btn_nav_youtube))
+        self.btn_nav_screenshot.clicked.connect( lambda: self.switch_tab(6, self.btn_nav_screenshot))
+        self.btn_nav_gdrive.clicked.connect(     lambda: self.switch_tab(7, self.btn_nav_gdrive))
+        self.nav_buttons = self._all_nav_btns
 
     def switch_tab(self, index, active_btn):
         self.stacked_widget.setCurrentIndex(index)
@@ -138,23 +172,35 @@ class ToolboxApp(QMainWindow):
             btn.setChecked(False)
         active_btn.setChecked(True)
 
-    def _open_ffmpeg_manager(self):
-        """Open the FFmpeg management dialog."""
+    def _open_components_manager(self):
+        """打开「下载必要组件」对话框。"""
         dlg = FFmpegDownloaderDialog(parent=self)
         dlg.exec()
-        # After the dialog closes, refresh the FFmpeg button style
-        self._update_ffmpeg_btn_style()
+        self._update_components_btn_style()
 
-    def _update_ffmpeg_btn_style(self):
-        """Show a red badge if FFmpeg is not installed."""
-        status = get_ffmpeg_status()
-        if status["installed"]:
-            self.btn_ffmpeg.setText("⚙️ FFmpeg ✅")
-            self.btn_ffmpeg.setStyleSheet("")
+    def _update_components_btn_style(self):
+        """根据 FFmpeg、人脸检测引擎（mediapipe/opencv）、yt-dlp 安装状态更新按钮样式。"""
+        ffmpeg_ok    = get_ffmpeg_status()["installed"]
+        face_det_ok  = get_face_detection_status()["installed"]   # mediapipe 或 可用的 opencv
+        ytdlp_ok     = get_ytdlp_status()["installed"]
+
+        if ffmpeg_ok and face_det_ok and ytdlp_ok:
+            self.btn_components.setText("📦 下载必要组件 ✅")
+            self.btn_components.setStyleSheet("")
         else:
-            self.btn_ffmpeg.setText("⚙️ FFmpeg ❌")
-            self.btn_ffmpeg.setStyleSheet(
+            missing = []
+            if not ffmpeg_ok:
+                missing.append("FFmpeg")
+            if not face_det_ok:
+                missing.append("人脸检测引擎 (mediapipe)")
+            if not ytdlp_ok:
+                missing.append("yt-dlp")
+            self.btn_components.setText("📦 下载必要组件 ❌")
+            self.btn_components.setStyleSheet(
                 "QPushButton { color: #f43f5e; font-weight: bold; }"
+            )
+            self.btn_components.setToolTip(
+                f"缺少必要组件：{', '.join(missing)}\n点击下载安装"
             )
 
     def toggle_theme(self):
@@ -168,7 +214,13 @@ class ToolboxApp(QMainWindow):
                 QWidget { font-family: "Microsoft YaHei", "Segoe UI"; font-size: 10pt; color: #d1d5db; }
                 QFrame#NavBar { background-color: #1e222d; border-bottom: 1px solid #2b303b; }
                 QLabel#LogoText { font-size: 14pt; font-weight: bold; color: #ffffff; }
-                QPushButton.NavBtn { background: transparent; border: none; color: #9ca3af; padding: 10px 15px; font-weight: bold; font-size: 11pt; border-radius: 6px; }
+                QScrollArea#NavScroll { background: transparent; border: none; }
+                QWidget#NavBtnContainer { background: transparent; }
+                QScrollArea#NavScroll QScrollBar:horizontal { height: 4px; background: transparent; margin: 0; border-radius: 2px; }
+                QScrollArea#NavScroll QScrollBar::handle:horizontal { background: #4b5563; border-radius: 2px; min-width: 20px; }
+                QScrollArea#NavScroll QScrollBar::add-line:horizontal, QScrollArea#NavScroll QScrollBar::sub-line:horizontal { width: 0; }
+                QScrollArea#NavScroll QScrollBar::add-page:horizontal, QScrollArea#NavScroll QScrollBar::sub-page:horizontal { background: none; }
+                QPushButton.NavBtn { background: transparent; border: none; color: #9ca3af; padding: 10px 16px; font-weight: bold; font-size: 10pt; border-radius: 6px; min-height: 52px; white-space: nowrap; }
                 QPushButton.NavBtn:hover { background-color: #2b303b; color: #ffffff; }
                 QPushButton.NavBtn:checked { background-color: #f43f5e; color: #ffffff; } 
                 QFrame.Card { background-color: #222631; border-radius: 10px; border: 1px solid #2b303b; }
@@ -200,7 +252,13 @@ class ToolboxApp(QMainWindow):
                 QWidget { font-family: "Microsoft YaHei", "Segoe UI"; font-size: 10pt; color: #374151; }
                 QFrame#NavBar { background-color: #ffffff; border-bottom: 1px solid #e5e7eb; }
                 QLabel#LogoText { font-size: 14pt; font-weight: bold; color: #111827; }
-                QPushButton.NavBtn { background: transparent; border: none; color: #6b7280; padding: 10px 15px; font-weight: bold; font-size: 11pt; border-radius: 6px; }
+                QScrollArea#NavScroll { background: transparent; border: none; }
+                QWidget#NavBtnContainer { background: transparent; }
+                QScrollArea#NavScroll QScrollBar:horizontal { height: 4px; background: transparent; margin: 0; border-radius: 2px; }
+                QScrollArea#NavScroll QScrollBar::handle:horizontal { background: #d1d5db; border-radius: 2px; min-width: 20px; }
+                QScrollArea#NavScroll QScrollBar::add-line:horizontal, QScrollArea#NavScroll QScrollBar::sub-line:horizontal { width: 0; }
+                QScrollArea#NavScroll QScrollBar::add-page:horizontal, QScrollArea#NavScroll QScrollBar::sub-page:horizontal { background: none; }
+                QPushButton.NavBtn { background: transparent; border: none; color: #6b7280; padding: 10px 16px; font-weight: bold; font-size: 10pt; border-radius: 6px; min-height: 52px; white-space: nowrap; }
                 QPushButton.NavBtn:hover { background-color: #f3f4f6; color: #111827; }
                 QPushButton.NavBtn:checked { background-color: #3b82f6; color: #ffffff; } 
                 QFrame.Card { background-color: #ffffff; border-radius: 10px; border: 1px solid #e5e7eb; }
@@ -227,11 +285,11 @@ class ToolboxApp(QMainWindow):
             """
         self.setStyleSheet(qss)
 
-    # 2. 软件关闭时，通知所有子页面保存设置
     def closeEvent(self, event):
         self.settings.setValue("is_dark_mode", self.is_dark_mode)
         self.video_tool.save_settings()
         self.img_merge_tool.save_settings()
+        self.copyright_tool.save_settings()   # ← NEW
         self.image_tool.save_settings()
         self.multi_segment_tool.save_settings()
         self.youtube_tool.save_settings()

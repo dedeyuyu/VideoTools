@@ -1,43 +1,37 @@
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
-
-output_installer/
-VideoTools-*.zip
-audio_library.json
-
-.env
-.env.*
-*.pem
-*.key
-*.crt
-*.pfx
-*.p12
-
+*.pyd
+.Python
+*.egg-info/
 dist/
-dist_pack/
-_build_temp/
 build/
-打包/
-
-node_modules/
-.DS_Store
-Thumbs.db
-
+*.spec
 *.log
-log/*.log
 
-.venv/
+# PyInstaller output
+dist/
+build/
+*.exe
+
+# Virtual environments
 venv/
+.venv/
 env/
 
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# IDE
+.vscode/
+.idea/
+*.swp
 
-# 启动调试日志（本地调试用，不提交）
-launch_error.txt
-launch_log.txt
-launch_stderr.txt
-launch_stdout.txt
-python_alive.txt
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# App data / temp
+*.tmp
+*.bak
+cookies_*.txt
+output/
