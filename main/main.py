@@ -39,12 +39,12 @@ class ToolboxApp(QMainWindow):
     def __init__(self):
         super().__init__()
         try:
-            myappid = 'mycompany.videotools.1.4.0'
+            myappid = 'mycompany.videotools.1.4.1'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.4.0")
+        self.setWindowTitle("视频集成工具 v1.4.1")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
