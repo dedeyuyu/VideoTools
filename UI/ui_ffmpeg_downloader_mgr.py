@@ -276,16 +276,16 @@ class PipInstallThread(QThread):
 # ── 主对话框：下载必要组件 ────────────────────────────────────────────────────
 
 class FFmpegDownloaderDialog(QDialog):
-    """「下载必要组件」对话框，统一管理 FFmpeg、opencv-python、yt-dlp。"""
+    """「下载必要组件」对话框，管理 FFmpeg 和 yt-dlp。
+    opencv-python 和 mediapipe 已作为标准依赖内置，无需手动安装。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("📦 下载必要组件")
         self.setMinimumWidth(580)
-        self.setMinimumHeight(680)
+        self.setMinimumHeight(500)
         self.setWindowFlag(Qt.WindowType.WindowContextHelpButtonHint, False)
         self._ffmpeg_thread = None
-        self._opencv_thread = None
         self._ytdlp_thread  = None
         self._apply_style()
         self._setup_ui()
@@ -422,24 +422,6 @@ class FFmpegDownloaderDialog(QDialog):
         src_lbl.setStyleSheet("color: #4b5563; font-size: 8pt;")
         lo.addWidget(src_lbl)
 
-        # ── opencv-python ─────────────────────────────────────────────────
-        cv_title = QLabel("🔍  opencv-python  —  人物人脸检测（处理版权图片）")
-        cv_title.setObjectName("SectionTitle")
-        lo.addWidget(cv_title)
-
-        self.btn_opencv_install = QPushButton("⬇️  安装 opencv-python")
-        self.btn_opencv_install.setObjectName("BtnInstallPy")
-        self.btn_opencv_install.clicked.connect(self._start_opencv_install)
-
-        lo.addWidget(self._make_component_card(
-            "lbl_cv_icon", "lbl_cv_text", "lbl_cv_path",
-            self.btn_opencv_install,
-            "prog_cv", "lbl_cv_log"
-        ))
-        cv_note = QLabel("通过 pip install opencv-python 安装，约 30 MB")
-        cv_note.setStyleSheet("color: #4b5563; font-size: 8pt;")
-        lo.addWidget(cv_note)
-
         # ── yt-dlp ────────────────────────────────────────────────────────
         yt_title = QLabel("📥  yt-dlp  —  YouTube下载 / 链接截图 / 云盘下载")
         yt_title.setObjectName("SectionTitle")
@@ -458,27 +440,21 @@ class FFmpegDownloaderDialog(QDialog):
         yt_note.setStyleSheet("color: #4b5563; font-size: 8pt;")
         lo.addWidget(yt_note)
 
-        # ── mediapipe ─────────────────────────────────────────────────────
-        mp_title = QLabel("🤖  mediapipe  —  人脸检测引擎（处理版权图片 · 推荐）")
-        mp_title.setObjectName("SectionTitle")
-        lo.addWidget(mp_title)
+        # ── 内置库说明 ────────────────────────────────────────────────────
+        bundled_title = QLabel("✅  opencv-python & mediapipe  —  已内置，无需手动安装")
+        bundled_title.setObjectName("SectionTitle")
+        lo.addWidget(bundled_title)
 
-        self.btn_mp_install = QPushButton("⬇️  安装 mediapipe")
-        self.btn_mp_install.setObjectName("BtnInstallPy")
-        self.btn_mp_install.clicked.connect(self._start_mp_install)
-
-        lo.addWidget(self._make_component_card(
-            "lbl_mp_icon", "lbl_mp_text", "lbl_mp_path",
-            self.btn_mp_install,
-            "prog_mp", "lbl_mp_log"
-        ))
-        mp_note = QLabel(
-            "推荐用于人脸检测。mediapipe 不依赖 opencv CascadeClassifier，更稳定可靠。\n"
-            "若 opencv-python 已能正常工作则不必重复安装。"
+        bundled_note = QLabel(
+            "opencv-python 和 mediapipe 已作为软件标准依赖内置，\n"
+            "安装软件时会自动配置，无需手动下载安装。"
         )
-        mp_note.setStyleSheet("color: #4b5563; font-size: 8pt;")
-        mp_note.setWordWrap(True)
-        lo.addWidget(mp_note)
+        bundled_note.setStyleSheet(
+            "color: #10b981; font-size: 9pt; padding: 10px 14px; "
+            "background: rgba(16,185,129,0.08); border-radius: 6px; border: 1px solid rgba(16,185,129,0.3);"
+        )
+        bundled_note.setWordWrap(True)
+        lo.addWidget(bundled_note)
 
         lo.addStretch()
 
@@ -495,9 +471,7 @@ class FFmpegDownloaderDialog(QDialog):
 
     def _refresh_all_status(self):
         self._refresh_ffmpeg_status()
-        self._refresh_opencv_status()
         self._refresh_ytdlp_status()
-        self._refresh_mp_status()
 
     def _refresh_ffmpeg_status(self):
         status = get_ffmpeg_status()
@@ -514,20 +488,6 @@ class FFmpegDownloaderDialog(QDialog):
             self.lbl_ffmpeg_path.setText(f"将安装到：{status['ffmpeg_dir']}")
             self.btn_ffmpeg_dl.setText("⬇️  下载并安装 FFmpeg")
 
-    def _refresh_opencv_status(self):
-        status = get_opencv_status()
-        if status["installed"]:
-            self.lbl_cv_icon.setText("✅")
-            self.lbl_cv_text.setText(f"opencv-python 已安装  (v{status['version']})")
-            self.lbl_cv_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #10b981;")
-            self.lbl_cv_path.setText("人脸检测功能可用")
-            self.btn_opencv_install.setText("🔄  重新安装（pip upgrade）")
-        else:
-            self.lbl_cv_icon.setText("❌")
-            self.lbl_cv_text.setText("未安装 opencv-python — 人脸检测不可用")
-            self.lbl_cv_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #f87171;")
-            self.lbl_cv_path.setText("「处理版权图片」功能需要此组件")
-            self.btn_opencv_install.setText("⬇️  安装 opencv-python")
 
     def _refresh_ytdlp_status(self):
         status = get_ytdlp_status()
@@ -574,40 +534,6 @@ class FFmpegDownloaderDialog(QDialog):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "下载失败", msg)
 
-    # ── opencv-python 安装 ────────────────────────────────────────────────────
-
-    def _start_opencv_install(self):
-        self.btn_opencv_install.setEnabled(False)
-        self.btn_close.setEnabled(False)
-        self.prog_cv.setVisible(True)
-        self.prog_cv.setValue(0)
-        self._opencv_thread = PipInstallThread(
-            "opencv-python", "opencv-python",
-            pre_uninstall=["opencv-python-headless", "opencv-contrib-python-headless",
-                           "opencv-contrib-python"],
-            parent=self
-        )
-        self._opencv_thread.progress.connect(self._on_cv_progress)
-        self._opencv_thread.finished.connect(self._on_cv_finished)
-        self._opencv_thread.start()
-
-    def _on_cv_progress(self, pct: int, msg: str):
-        self.prog_cv.setValue(pct)
-        self.lbl_cv_log.setText(msg[:100])
-
-    def _on_cv_finished(self, success: bool, msg: str):
-        self.btn_opencv_install.setEnabled(True)
-        self.btn_close.setEnabled(True)
-        if success:
-            self.prog_cv.setValue(100)
-            self.lbl_cv_log.setText("✅ 安装完成")
-            self._refresh_opencv_status()
-        else:
-            self.prog_cv.setValue(0)
-            self.lbl_cv_log.setText("⚠️ 安装失败，请重试")
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "安装失败", msg)
-
     # ── yt-dlp 安装 ───────────────────────────────────────────────────────────
 
     def _start_ytdlp_install(self):
@@ -637,67 +563,10 @@ class FFmpegDownloaderDialog(QDialog):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "安装失败", msg)
 
-    # ── mediapipe 安装 ────────────────────────────────────────────────────────
-
-    def _refresh_mp_status(self):
-        status = get_mediapipe_status()
-        face_ok = get_face_detection_status()
-        if status["installed"]:
-            self.lbl_mp_icon.setText("✅")
-            self.lbl_mp_text.setText(f"mediapipe 已安装  (v{status['version']})")
-            self.lbl_mp_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #10b981;")
-            self.lbl_mp_path.setText("人脸检测功能可用（推荐引擎）")
-            self.btn_mp_install.setText("🔄  重新安装（pip upgrade）")
-        elif face_ok["installed"]:
-            # opencv 可作为备用
-            self.lbl_mp_icon.setText("ℹ️")
-            self.lbl_mp_text.setText("mediapipe 未安装，但 opencv 可作为备用")
-            self.lbl_mp_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #f59e0b;")
-            self.lbl_mp_path.setText("如果 opencv 人脸检测出现问题，可安装 mediapipe 作为替代")
-            self.btn_mp_install.setText("⬇️  安装 mediapipe（推荐）")
-        else:
-            self.lbl_mp_icon.setText("❌")
-            self.lbl_mp_text.setText("未安装 mediapipe — 人脸检测不可用")
-            self.lbl_mp_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #f87171;")
-            self.lbl_mp_path.setText("「处理版权图片」人脸检测功能需要此组件")
-            self.btn_mp_install.setText("⬇️  安装 mediapipe")
-
-    def _start_mp_install(self):
-        self.btn_mp_install.setEnabled(False)
-        self.btn_close.setEnabled(False)
-        self.prog_mp.setVisible(True)
-        self.prog_mp.setValue(0)
-        # 固定安装 0.10.x，因为 1.0+ 移除了 solutions.face_detection API
-        self._mp_thread = PipInstallThread(
-            "mediapipe==0.10.21", "mediapipe",
-            parent=self
-        )
-        self._mp_thread.progress.connect(self._on_mp_progress)
-        self._mp_thread.finished.connect(self._on_mp_finished)
-        self._mp_thread.start()
-
-    def _on_mp_progress(self, pct: int, msg: str):
-        self.prog_mp.setValue(pct)
-        self.lbl_mp_log.setText(msg[:100])
-
-    def _on_mp_finished(self, success: bool, msg: str):
-        self.btn_mp_install.setEnabled(True)
-        self.btn_close.setEnabled(True)
-        if success:
-            self.prog_mp.setValue(100)
-            self.lbl_mp_log.setText("✅ 安装完成")
-            self._refresh_mp_status()
-        else:
-            self.prog_mp.setValue(0)
-            self.lbl_mp_log.setText("⚠️ 安装失败，请重试")
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.critical(self, "安装失败", msg)
-
     # ── 关闭处理 ──────────────────────────────────────────────────────────────
 
     def _on_close(self):
-        for thread in (self._ffmpeg_thread, self._opencv_thread,
-                       self._ytdlp_thread, getattr(self, '_mp_thread', None)):
+        for thread in (self._ffmpeg_thread, self._ytdlp_thread):
             if thread and thread.isRunning():
                 if hasattr(thread, "stop"):
                     thread.stop()
@@ -705,8 +574,7 @@ class FFmpegDownloaderDialog(QDialog):
         self.reject()
 
     def closeEvent(self, event):
-        for thread in (self._ffmpeg_thread, self._opencv_thread,
-                       self._ytdlp_thread, getattr(self, '_mp_thread', None)):
+        for thread in (self._ffmpeg_thread, self._ytdlp_thread):
             if thread and thread.isRunning():
                 if hasattr(thread, "stop"):
                     thread.stop()
