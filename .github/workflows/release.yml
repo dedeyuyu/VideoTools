@@ -59,7 +59,7 @@ jobs:
           Write-Host "Created: dist\$zipName ($([Math]::Round((Get-Item "dist\$zipName").Length/1MB,1))MB)"
 
       - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "dist/VideoTools-${{ github.ref_name }}-windows.zip"
 
