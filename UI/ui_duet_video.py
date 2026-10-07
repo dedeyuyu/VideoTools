@@ -222,11 +222,60 @@ class ScreenPicker(QWidget):
         self.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setMouseTracking(True)
         self.setGeometry(QApplication.primaryScreen().virtualGeometry())
+        self._pos = QPoint(-1000, -1000)
+        self._mag = None
+        self._hex = ""
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(0, 0, 0, 1))
+        
+        if self._mag and self._pos.x() > -1000:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            cx = self._pos.x() + 40
+            cy = self._pos.y() + 40
+            
+            sc = QApplication.screenAt(self._pos) or QApplication.primaryScreen()
+            sg = sc.geometry()
+            vx, vy, vw, vh = sg.x(), sg.y(), sg.width(), sg.height()
+            
+            r = 60
+            if cx + r > vx + vw: cx = self._pos.x() - 40 - r
+            if cy + r > vy + vh: cy = self._pos.y() - 40 - r
+            
+            p.setPen(QPen(QColor(200, 200, 200), 4))
+            p.drawEllipse(cx, cy, r*2, r*2)
+            
+            path = QPainterPath()
+            path.addEllipse(cx, cy, r*2, r*2)
+            p.setClipPath(path)
+            
+            p.drawPixmap(cx, cy, self._mag)
+            
+            p.setPen(QPen(QColor(255, 255, 255, 180), 2))
+            p.drawLine(cx + r - 10, cy + r, cx + r + 10, cy + r)
+            p.drawLine(cx + r, cy + r - 10, cx + r, cy + r + 10)
+            
+            p.setClipping(False)
+            p.setPen(Qt.GlobalColor.white)
+            p.setBrush(QColor(0, 0, 0, 150))
+            p.drawRect(cx + r - 35, cy + r*2 + 5, 70, 24)
+            p.drawText(cx + r - 35, cy + r*2 + 5, 70, 24, Qt.AlignmentFlag.AlignCenter, self._hex)
+
+    def mouseMoveEvent(self, event):
+        pos = event.globalPosition().toPoint()
+        self._pos = pos
+        sc = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        
+        rx = pos.x() - sc.geometry().x() - 7
+        ry = pos.y() - sc.geometry().y() - 7
+        px = sc.grabWindow(0, rx, ry, 15, 15)
+        self._mag = px.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio)
+        self._hex = px.toImage().pixelColor(7, 7).name().upper()
+        self.update()
 
     def mousePressEvent(self, event):
         self.hide()
@@ -259,8 +308,12 @@ class ColorButton(QWidget):
         self.btn_color.setFixedHeight(30)
         self.btn_color.clicked.connect(self._pick)
         
-        self.btn_drop = QPushButton("🖌")
+        self.btn_drop = QPushButton()
         self.btn_drop.setFixedSize(30, 30)
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        icon_path = os.path.join(base_dir, "theme_icons", "eyedropper.svg")
+        self.btn_drop.setIcon(QIcon(icon_path))
         self.btn_drop.setToolTip("屏幕吸管：点击后，再点击屏幕任意位置吸取颜色")
         self.btn_drop.clicked.connect(self._start_eyedropper)
         
