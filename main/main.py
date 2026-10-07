@@ -3,7 +3,6 @@ import os
 import ctypes
 
 # ================= 新增：跨文件夹路径引导 =================
-# 让程序知道项目的根目录在哪里，从而能找到 UI、Video 等文件夹
 if getattr(sys, 'frozen', False):
     root_dir = os.path.dirname(sys.executable)
 else:
@@ -18,7 +17,7 @@ def resource_path(relative_path):
 
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QHBoxLayout,
                              QStackedWidget, QVBoxLayout, QPushButton, QFrame,
-                             QLabel, QScrollArea)
+                             QLabel, QScrollArea, QTreeWidget, QTreeWidgetItem)
 from PyQt6.QtCore import Qt, QSettings
 from PyQt6.QtGui import QIcon
 
@@ -30,6 +29,8 @@ from UI.ui_youtube_downloader import YouTubeDownloaderUI
 from UI.ui_auto_screenshot import AutoScreenshotUI
 from UI.ui_gdrive_downloader import GDriveDownloaderUI
 from UI.ui_copyright_processor import CopyrightProcessorUI
+from UI.ui_duet_video import DuetVideoUI
+from UI.ui_landscape_to_portrait import LandscapeToPortraitUI
 from UI.ui_ffmpeg_downloader_mgr import (FFmpegDownloaderDialog, get_ffmpeg_status,
                                           get_opencv_status, get_ytdlp_status,
                                           get_mediapipe_status, get_face_detection_status)
@@ -44,137 +45,144 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.4.1")
+        self.setWindowTitle("视频集成工具 v1.5.0")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
-        # 初始化设置管理器，读取深色模式偏好
         self.settings = QSettings("MyCompany", "VideoToolbox")
         self.is_dark_mode = self.settings.value("is_dark_mode", True, type=bool)
 
         self.setup_ui()
         self.apply_theme()
-        self._update_components_btn_style()  # 启动时检测组件状态
+        from UI.wheel_guard import install_wheel_guard
+        install_wheel_guard()
+        self._update_components_btn_style()
 
     def setup_ui(self):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        self.main_layout = QVBoxLayout(central_widget)
+        self.main_layout = QHBoxLayout(central_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        self.nav_bar = QFrame()
-        self.nav_bar.setObjectName("NavBar")
-        self.nav_bar.setFixedHeight(88)
-        nav_layout = QHBoxLayout(self.nav_bar)
-        nav_layout.setContentsMargins(20, 0, 12, 0)
-        nav_layout.setSpacing(10)
+        # ── 左侧侧边栏 ────────────────────────────────────────────────
+        self.sidebar = QFrame()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(220)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(10, 20, 10, 20)
+        sidebar_layout.setSpacing(10)
 
         logo_label = QLabel("🎬 视频集成工具")
         logo_label.setObjectName("LogoText")
-        nav_layout.addWidget(logo_label)
-        nav_layout.addSpacing(10)
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sidebar_layout.addWidget(logo_label)
+        sidebar_layout.addSpacing(20)
 
-        # ── 导航按钮（包裹在 QScrollArea 中，超出宽度时横向滚动）──────────
-        self.btn_nav_video      = QPushButton("🚀 视频合并与转场")
-        self.btn_nav_img_merge  = QPushButton("✨ 图片合并成视频")
-        self.btn_nav_copyright  = QPushButton("🎨 处理版权图片")
-        self.btn_nav_image      = QPushButton("🖼️ 图片批量裁剪")
-        self.btn_nav_multi      = QPushButton("🎞️ 多片段合成")
-        self.btn_nav_youtube    = QPushButton("📥 YouTube下载")
-        self.btn_nav_screenshot = QPushButton("📸 链接截图")
-        self.btn_nav_gdrive     = QPushButton("☁️ 云盘下载")
+        self.nav_tree = QTreeWidget()
+        self.nav_tree.setObjectName("NavTree")
+        self.nav_tree.setHeaderHidden(True)
+        self.nav_tree.setIndentation(15)
+        self.nav_tree.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        self._all_nav_btns = [
-            self.btn_nav_video, self.btn_nav_img_merge, self.btn_nav_copyright,
-            self.btn_nav_image, self.btn_nav_multi, self.btn_nav_youtube,
-            self.btn_nav_screenshot, self.btn_nav_gdrive,
-        ]
+        # 视频批量工具
+        cat_video = QTreeWidgetItem(["📂 视频批量工具"])
+        cat_video.setFlags(cat_video.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        
+        self.item_duet = QTreeWidgetItem(["✨ 合拍视频批量合成"])
+        self.item_video = QTreeWidgetItem(["🚀 视频合并与转场"])
+        self.item_img_merge = QTreeWidgetItem(["✨ 图片合并成视频"])
+        self.item_copyright = QTreeWidgetItem(["🎨 处理版权图片"])
+        self.item_l2p = QTreeWidgetItem(["🔃 横屏转竖屏"])
+        self.item_image = QTreeWidgetItem(["🖼️ 图片批量裁剪"])
+        self.item_multi = QTreeWidgetItem(["🎞️ 多片段合成"])
+        self.item_screenshot = QTreeWidgetItem(["📸 链接截图"])
+        
+        cat_video.addChildren([self.item_duet, self.item_video, self.item_img_merge, self.item_copyright, 
+                               self.item_l2p, self.item_image, self.item_multi, self.item_screenshot])
+        self.nav_tree.addTopLevelItem(cat_video)
 
-        # 内部容器：按钮保持自然宽度，不被压缩
-        nav_btn_container = QWidget()
-        nav_btn_container.setObjectName("NavBtnContainer")
-        nav_btn_inner = QHBoxLayout(nav_btn_container)
-        nav_btn_inner.setContentsMargins(4, 4, 4, 4)
-        nav_btn_inner.setSpacing(6)
-        for btn in self._all_nav_btns:
-            btn.setCheckable(True)
-            btn.setProperty("class", "NavBtn")
-            btn.setFixedHeight(62)          # 明确高度，确保文字完整显示
-            btn.setMinimumWidth(130)        # 足够宽度显示中文名称
-            nav_btn_inner.addWidget(btn)
-        nav_btn_inner.addStretch()
-        nav_btn_container.setFixedHeight(70)   # 容器高度 = 按钮高度 + 上下 padding
+        # 通用下载
+        cat_download = QTreeWidgetItem(["📂 通用下载"])
+        cat_download.setFlags(cat_download.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+        
+        self.item_youtube = QTreeWidgetItem(["📥 YouTube下载"])
+        self.item_gdrive = QTreeWidgetItem(["☁️ 云盘下载"])
+        
+        cat_download.addChildren([self.item_youtube, self.item_gdrive])
+        self.nav_tree.addTopLevelItem(cat_download)
 
-        # 滚动区：仅横向滚动，纵向不滚动，无边框
-        nav_scroll = QScrollArea()
-        nav_scroll.setWidget(nav_btn_container)
-        nav_scroll.setWidgetResizable(False)          # 保持按钮自然宽度
-        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        nav_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        nav_scroll.setObjectName("NavScroll")
-        nav_scroll.setFixedHeight(70)          # 与容器等高，不发生裁剪
+        self.nav_tree.expandAll()
+        sidebar_layout.addWidget(self.nav_tree)
+        sidebar_layout.addStretch()
 
-        self.btn_nav_video.setChecked(True)
-        nav_layout.addWidget(nav_scroll, 1)   # stretch=1，占满剩余空间
-
-        # ── 右侧功能按钮 ────────────────────────────────────────────────
-        # 「下载必要组件」（原 FFmpeg 按钮，现在涵盖所有必要组件）
         self.btn_components = QPushButton("📦 下载必要组件")
         self.btn_components.setProperty("class", "ActionBtn")
         self.btn_components.setToolTip("管理必要组件 — FFmpeg / opencv-python\n检测状态 / 一键下载安装")
         self.btn_components.clicked.connect(self._open_components_manager)
-        nav_layout.addWidget(self.btn_components)
+        sidebar_layout.addWidget(self.btn_components)
 
         self.btn_theme = QPushButton("切换亮/暗色")
         self.btn_theme.setProperty("class", "ActionBtn")
         self.btn_theme.clicked.connect(self.toggle_theme)
-        nav_layout.addWidget(self.btn_theme)
+        sidebar_layout.addWidget(self.btn_theme)
 
-        self.main_layout.addWidget(self.nav_bar)
+        self.main_layout.addWidget(self.sidebar)
 
-        # ── 页面容器 ─────────────────────────────────────────────────────
+        # ── 右侧主内容区 ─────────────────────────────────────────────────────
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.setContentsMargins(20, 20, 20, 20)
 
+        self.duet_tool       = DuetVideoUI()
         self.video_tool      = VideoMergerUI()
         self.img_merge_tool  = ImageMergerUI()
-        self.copyright_tool  = CopyrightProcessorUI()   # ← NEW
+        self.copyright_tool  = CopyrightProcessorUI()
+        self.l2p_tool        = LandscapeToPortraitUI()
         self.image_tool      = ImageCropperUI()
         self.multi_segment_tool = MultiSegmentUI()
-        self.youtube_tool    = YouTubeDownloaderUI()
         self.screenshot_tool = AutoScreenshotUI()
+        self.youtube_tool    = YouTubeDownloaderUI()
         self.gdrive_tool     = GDriveDownloaderUI()
 
-        # 按索引顺序添加（必须与 nav 按钮顺序一致）
-        self.stacked_widget.addWidget(self.video_tool)          # 0
-        self.stacked_widget.addWidget(self.img_merge_tool)      # 1
-        self.stacked_widget.addWidget(self.copyright_tool)      # 2  ← NEW
-        self.stacked_widget.addWidget(self.image_tool)          # 3
-        self.stacked_widget.addWidget(self.multi_segment_tool)  # 4
-        self.stacked_widget.addWidget(self.youtube_tool)        # 5
-        self.stacked_widget.addWidget(self.screenshot_tool)     # 6
-        self.stacked_widget.addWidget(self.gdrive_tool)         # 7
+        self.stacked_widget.addWidget(self.duet_tool)           # 0
+        self.stacked_widget.addWidget(self.video_tool)          # 1
+        self.stacked_widget.addWidget(self.img_merge_tool)      # 2
+        self.stacked_widget.addWidget(self.copyright_tool)      # 3
+        self.stacked_widget.addWidget(self.l2p_tool)            # 4
+        self.stacked_widget.addWidget(self.image_tool)          # 5
+        self.stacked_widget.addWidget(self.multi_segment_tool)  # 6
+        self.stacked_widget.addWidget(self.screenshot_tool)     # 7
+        self.stacked_widget.addWidget(self.youtube_tool)        # 8
+        self.stacked_widget.addWidget(self.gdrive_tool)         # 9
 
-        self.main_layout.addWidget(self.stacked_widget)
+        self.content_layout.addWidget(self.stacked_widget)
+        self.main_layout.addWidget(self.content_widget)
 
-        # ── 导航点击绑定 ─────────────────────────────────────────────────
-        self.btn_nav_video.clicked.connect(      lambda: self.switch_tab(0, self.btn_nav_video))
-        self.btn_nav_img_merge.clicked.connect(  lambda: self.switch_tab(1, self.btn_nav_img_merge))
-        self.btn_nav_copyright.clicked.connect(  lambda: self.switch_tab(2, self.btn_nav_copyright))
-        self.btn_nav_image.clicked.connect(      lambda: self.switch_tab(3, self.btn_nav_image))
-        self.btn_nav_multi.clicked.connect(      lambda: self.switch_tab(4, self.btn_nav_multi))
-        self.btn_nav_youtube.clicked.connect(    lambda: self.switch_tab(5, self.btn_nav_youtube))
-        self.btn_nav_screenshot.clicked.connect( lambda: self.switch_tab(6, self.btn_nav_screenshot))
-        self.btn_nav_gdrive.clicked.connect(     lambda: self.switch_tab(7, self.btn_nav_gdrive))
-        self.nav_buttons = self._all_nav_btns
+        self.item_to_index = {
+            id(self.item_duet): 0,
+            id(self.item_video): 1,
+            id(self.item_img_merge): 2,
+            id(self.item_copyright): 3,
+            id(self.item_l2p): 4,
+            id(self.item_image): 5,
+            id(self.item_multi): 6,
+            id(self.item_screenshot): 7,
+            id(self.item_youtube): 8,
+            id(self.item_gdrive): 9,
+        }
 
-    def switch_tab(self, index, active_btn):
-        self.stacked_widget.setCurrentIndex(index)
-        for btn in self.nav_buttons:
-            btn.setChecked(False)
-        active_btn.setChecked(True)
+        self.nav_tree.itemClicked.connect(self.on_tree_item_clicked)
+        self.nav_tree.setCurrentItem(self.item_duet)
+        self.stacked_widget.setCurrentIndex(0)
+
+    def on_tree_item_clicked(self, item, column):
+        idx = self.item_to_index.get(id(item))
+        if idx is not None:
+            self.stacked_widget.setCurrentIndex(idx)
 
     def _open_components_manager(self):
         """打开「下载必要组件」对话框。"""
@@ -214,78 +222,305 @@ class ToolboxApp(QMainWindow):
     def apply_theme(self):
         if self.is_dark_mode:
             qss = """
-                QMainWindow { background-color: #1a1d27; }
-                QWidget { font-family: "Microsoft YaHei", "Segoe UI"; font-size: 10pt; color: #d1d5db; }
-                QFrame#NavBar { background-color: #1e222d; border-bottom: 1px solid #2b303b; }
-                QLabel#LogoText { font-size: 14pt; font-weight: bold; color: #ffffff; }
-                QScrollArea#NavScroll { background: transparent; border: none; }
-                QWidget#NavBtnContainer { background: transparent; }
-                QScrollArea#NavScroll QScrollBar:horizontal { height: 4px; background: transparent; margin: 0; border-radius: 2px; }
-                QScrollArea#NavScroll QScrollBar::handle:horizontal { background: #4b5563; border-radius: 2px; min-width: 20px; }
-                QScrollArea#NavScroll QScrollBar::add-line:horizontal, QScrollArea#NavScroll QScrollBar::sub-line:horizontal { width: 0; }
-                QScrollArea#NavScroll QScrollBar::add-page:horizontal, QScrollArea#NavScroll QScrollBar::sub-page:horizontal { background: none; }
-                QPushButton.NavBtn { background: transparent; border: none; color: #9ca3af; padding: 6px 14px; font-weight: bold; font-size: 10pt; border-radius: 6px; }
-                QPushButton.NavBtn:hover { background-color: #2b303b; color: #ffffff; }
-                QPushButton.NavBtn:checked { background-color: #f43f5e; color: #ffffff; } 
-                QFrame.Card { background-color: #222631; border-radius: 10px; border: 1px solid #2b303b; }
-                QLabel.CardTitle { font-size: 11pt; font-weight: bold; color: #ffffff; }
-                QPushButton { background-color: #374151; color: white; border: none; border-radius: 6px; padding: 8px 15px; }
-                QPushButton:hover { background-color: #4b5563; }
-                QPushButton:disabled { background-color: #1f2937; color: #6b7280; }
-                QPushButton#PrimaryBtn { background-color: #f43f5e; font-size: 12pt; font-weight: bold; padding: 12px; }
-                QPushButton#PrimaryBtn:hover { background-color: #e11d48; }
-                QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit { background-color: #1a1d27; border: 1px solid #374151; border-radius: 4px; padding: 5px; color: #ffffff; }
+                QMainWindow { background-color: #121212; }
+                QWidget { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 10pt; color: #E0E0E0; }
+                
+                QFrame#Sidebar { 
+                    background-color: #1A1A1A; 
+                    border-right: 1px solid #282828; 
+                }
+                QLabel#LogoText { 
+                    font-size: 15pt; 
+                    font-weight: 600; 
+                    color: #FFFFFF; 
+                    padding: 10px 0;
+                    letter-spacing: 1px;
+                }
+                
+                QTreeWidget#NavTree { 
+                    background: transparent; 
+                    border: none; 
+                    outline: none; 
+                }
+                QTreeWidget#NavTree::item { 
+                    padding: 12px 10px; 
+                    border-radius: 8px; 
+                    margin: 4px 6px;
+                }
+                QTreeWidget#NavTree::item:hover { 
+                    background-color: #252525; 
+                }
+                QTreeWidget#NavTree::item:selected { 
+                    background-color: #2D3748; 
+                    color: #63B3ED; 
+                    font-weight: bold; 
+                }
+                
+                QFrame.Card { 
+                    background-color: #1A1A1A; 
+                    border-radius: 12px; 
+                    border: 1px solid #282828; 
+                }
+                QLabel.CardTitle { 
+                    font-size: 12pt; 
+                    font-weight: bold; 
+                    color: #FFFFFF; 
+                }
+                
+                QPushButton { 
+                    background-color: #252525; 
+                    color: #E0E0E0; 
+                    border: 1px solid #333333; 
+                    border-radius: 6px; 
+                    padding: 8px 16px; 
+                }
+                QPushButton:hover { 
+                    background-color: #303030; 
+                    border: 1px solid #444444; 
+                }
+                QPushButton:disabled { 
+                    background-color: #161616; 
+                    color: #555555; 
+                    border: 1px solid #222222;
+                }
+                
+                QPushButton.ActionBtn { 
+                    background-color: #3182CE; 
+                    color: white; 
+                    border: none; 
+                    font-weight: bold; 
+                    padding: 10px 18px; 
+                    border-radius: 8px;
+                }
+                QPushButton.ActionBtn:hover { 
+                    background-color: #2B6CB0; 
+                }
+                
+                QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit { 
+                    background-color: #121212; 
+                    border: 1px solid #333333; 
+                    border-radius: 6px; 
+                    padding: 6px 10px; 
+                    color: #E0E0E0; 
+                }
+                QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus {
+                    border: 1px solid #3182CE;
+                }
                 QComboBox::drop-down { border: none; }
-                QListWidget { background-color: #1a1d27; border: 2px dashed #374151; border-radius: 8px; padding: 10px; outline: none; }
-                QListWidget::item { padding: 5px; border-bottom: 1px solid #2b303b; }
-                QListWidget::item:selected { background-color: #374151; border-radius: 4px; }
-                QProgressBar { border: 1px solid #374151; border-radius: 6px; text-align: center; background-color: #1a1d27; }
-                QProgressBar::chunk { background-color: #f43f5e; border-radius: 5px; }
-                QSlider::groove:horizontal { border-radius: 4px; height: 6px; background: #374151; }
-                QSlider::handle:horizontal { background: #f43f5e; width: 14px; margin: -4px 0; border-radius: 7px; }
+                
+                QListWidget { 
+                    background-color: #121212; 
+                    border: 1px solid #282828; 
+                    border-radius: 8px; 
+                    padding: 6px; 
+                    outline: none; 
+                }
+                QListWidget::item { 
+                    padding: 10px; 
+                    border-bottom: 1px solid #1E1E1E; 
+                    border-radius: 4px;
+                }
+                QListWidget::item:selected { 
+                    background-color: #252525; 
+                    border: 1px solid #333333;
+                }
+                
+                QProgressBar { 
+                    border: none; 
+                    border-radius: 6px; 
+                    text-align: center; 
+                    background-color: #252525; 
+                    color: #FFFFFF;
+                }
+                QProgressBar::chunk { 
+                    background-color: #3182CE; 
+                    border-radius: 6px; 
+                }
+                
+                QSlider::groove:horizontal { border-radius: 3px; height: 6px; background: #252525; }
+                QSlider::handle:horizontal { background: #3182CE; width: 14px; margin: -4px 0; border-radius: 7px; }
+                
                 QScrollArea { background: transparent; border: none; }
-                QScrollBar:vertical { background: #ffffff; width: 8px; margin: 0; border-radius: 4px; }
-                QScrollBar::handle:vertical { background: #4b5563; min-height: 28px; border-radius: 4px; }
-                QScrollBar::handle:vertical:hover { background: #9ca3af; }
+                QScrollBar:vertical { background: transparent; width: 6px; margin: 0; border-radius: 3px; }
+                QScrollBar::handle:vertical { background: #333333; min-height: 20px; border-radius: 3px; }
+                QScrollBar::handle:vertical:hover { background: #555555; }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+
+                /* —— 选中项 / 标签页 / 表格 / 文本框（暗色） —— */
+                QListWidget::item:selected { background-color: #2D3748; color: #FFFFFF; }
+                QScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; }
+                QScrollArea > QWidget#qt_scrollarea_viewport > QWidget { background: transparent; }
+                QTabWidget::pane { background-color: #1A1A1A; border: 1px solid #282828; border-radius: 8px; top: -1px; }
+                QTabWidget QStackedWidget { background: transparent; }
+                QTabBar::tab { background: #252525; color: #A0AEC0; padding: 7px 16px; margin-right: 2px;
+                               border-top-left-radius: 6px; border-top-right-radius: 6px; }
+                QTabBar::tab:selected { background: #3182CE; color: #FFFFFF; font-weight: bold; }
+                QTabBar::tab:hover:!selected { background: #303030; color: #E0E0E0; }
+                QGroupBox { border: 1px solid #333333; border-radius: 8px; margin-top: 14px; padding-top: 8px; color: #E0E0E0; }
+                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #E0E0E0; }
+                QTableWidget, QTableView { background-color: #121212; color: #E0E0E0; gridline-color: #282828;
+                                           border: 1px solid #282828; border-radius: 8px;
+                                           selection-background-color: #2D3748; selection-color: #FFFFFF; }
+                QHeaderView::section { background-color: #252525; color: #E0E0E0; border: none;
+                                       border-right: 1px solid #333333; padding: 6px; }
+                QTableCornerButton::section { background-color: #252525; border: none; }
+                QPlainTextEdit, QTextEdit { background-color: #121212; color: #E0E0E0;
+                                            border: 1px solid #333333; border-radius: 6px; }
+                QComboBox QAbstractItemView { background-color: #1A1A1A; color: #E0E0E0;
+                                              selection-background-color: #2D3748; selection-color: #FFFFFF; }
+                QDialog { background-color: #1A1A1A; }
+                QCheckBox, QLabel { background: transparent; }
             """
         else:
             qss = """
-                QMainWindow { background-color: #f3f4f6; }
-                QWidget { font-family: "Microsoft YaHei", "Segoe UI"; font-size: 10pt; color: #374151; }
-                QFrame#NavBar { background-color: #ffffff; border-bottom: 1px solid #e5e7eb; }
-                QLabel#LogoText { font-size: 14pt; font-weight: bold; color: #111827; }
-                QScrollArea#NavScroll { background: transparent; border: none; }
-                QWidget#NavBtnContainer { background: transparent; }
-                QScrollArea#NavScroll QScrollBar:horizontal { height: 4px; background: transparent; margin: 0; border-radius: 2px; }
-                QScrollArea#NavScroll QScrollBar::handle:horizontal { background: #d1d5db; border-radius: 2px; min-width: 20px; }
-                QScrollArea#NavScroll QScrollBar::add-line:horizontal, QScrollArea#NavScroll QScrollBar::sub-line:horizontal { width: 0; }
-                QScrollArea#NavScroll QScrollBar::add-page:horizontal, QScrollArea#NavScroll QScrollBar::sub-page:horizontal { background: none; }
-                QPushButton.NavBtn { background: transparent; border: none; color: #6b7280; padding: 6px 14px; font-weight: bold; font-size: 10pt; border-radius: 6px; }
-                QPushButton.NavBtn:hover { background-color: #f3f4f6; color: #111827; }
-                QPushButton.NavBtn:checked { background-color: #3b82f6; color: #ffffff; } 
-                QFrame.Card { background-color: #ffffff; border-radius: 10px; border: 1px solid #e5e7eb; }
-                QLabel.CardTitle { font-size: 11pt; font-weight: bold; color: #111827; }
-                QPushButton { background-color: #f3f4f6; color: #374151; border: 1px solid #d1d5db; border-radius: 6px; padding: 8px 15px; }
-                QPushButton:hover { background-color: #e5e7eb; }
-                QPushButton:disabled { background-color: #f3f4f6; color: #9ca3af; }
-                QPushButton#PrimaryBtn { background-color: #3b82f6; color: white; border: none; font-size: 12pt; font-weight: bold; padding: 12px; }
-                QPushButton#PrimaryBtn:hover { background-color: #2563eb; }
-                QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit { background-color: #f9fafb; border: 1px solid #d1d5db; border-radius: 4px; padding: 5px; color: #111827; }
-                QListWidget { background-color: #f9fafb; border: 2px dashed #d1d5db; border-radius: 8px; padding: 10px; outline: none; }
-                QListWidget::item { padding: 5px; border-bottom: 1px solid #e5e7eb; }
-                QListWidget::item:selected { background-color: #e5e7eb; border-radius: 4px; }
-                QProgressBar { border: 1px solid #d1d5db; border-radius: 6px; text-align: center; background-color: #f9fafb; }
-                QProgressBar::chunk { background-color: #3b82f6; border-radius: 5px; }
-                QSlider::groove:horizontal { border-radius: 4px; height: 6px; background: #d1d5db; }
-                QSlider::handle:horizontal { background: #3b82f6; width: 14px; margin: -4px 0; border-radius: 7px; }
+                QMainWindow { background-color: #F8F9FA; }
+                QWidget { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; font-size: 10pt; color: #2D3748; }
+                
+                QFrame#Sidebar { 
+                    background-color: #FFFFFF; 
+                    border-right: 1px solid #E2E8F0; 
+                }
+                QLabel#LogoText { 
+                    font-size: 15pt; 
+                    font-weight: 600; 
+                    color: #1A202C; 
+                    padding: 10px 0;
+                    letter-spacing: 1px;
+                }
+                
+                QTreeWidget#NavTree { 
+                    background: transparent; 
+                    border: none; 
+                    outline: none; 
+                }
+                QTreeWidget#NavTree::item { 
+                    padding: 12px 10px; 
+                    border-radius: 8px; 
+                    margin: 4px 6px;
+                }
+                QTreeWidget#NavTree::item:hover { 
+                    background-color: #F7FAFC; 
+                }
+                QTreeWidget#NavTree::item:selected { 
+                    background-color: #EBF8FF; 
+                    color: #3182CE; 
+                    font-weight: bold; 
+                }
+                
+                QFrame.Card { 
+                    background-color: #FFFFFF; 
+                    border-radius: 12px; 
+                    border: 1px solid #E2E8F0; 
+                }
+                QLabel.CardTitle { 
+                    font-size: 12pt; 
+                    font-weight: bold; 
+                    color: #1A202C; 
+                }
+                
+                QPushButton { 
+                    background-color: #FFFFFF; 
+                    color: #4A5568; 
+                    border: 1px solid #E2E8F0; 
+                    border-radius: 6px; 
+                    padding: 8px 16px; 
+                }
+                QPushButton:hover { 
+                    background-color: #F7FAFC; 
+                    border: 1px solid #CBD5E0; 
+                }
+                QPushButton:disabled { 
+                    background-color: #F7FAFC; 
+                    color: #A0AEC0; 
+                    border: 1px solid #E2E8F0;
+                }
+                
+                QPushButton.ActionBtn { 
+                    background-color: #3182CE; 
+                    color: white; 
+                    border: none; 
+                    font-weight: bold; 
+                    padding: 10px 18px; 
+                    border-radius: 8px;
+                }
+                QPushButton.ActionBtn:hover { 
+                    background-color: #2B6CB0; 
+                }
+                
+                QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit { 
+                    background-color: #FFFFFF; 
+                    border: 1px solid #E2E8F0; 
+                    border-radius: 6px; 
+                    padding: 6px 10px; 
+                    color: #2D3748; 
+                }
+                QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus {
+                    border: 1px solid #3182CE;
+                }
+                QComboBox::drop-down { border: none; }
+                
+                QListWidget { 
+                    background-color: #FFFFFF; 
+                    border: 1px solid #E2E8F0; 
+                    border-radius: 8px; 
+                    padding: 6px; 
+                    outline: none; 
+                }
+                QListWidget::item { 
+                    padding: 10px; 
+                    border-bottom: 1px solid #F7FAFC; 
+                    border-radius: 4px;
+                }
+                QListWidget::item:selected { 
+                    background-color: #F7FAFC; 
+                    border: 1px solid #E2E8F0;
+                }
+                
+                QProgressBar { 
+                    border: none; 
+                    border-radius: 6px; 
+                    text-align: center; 
+                    background-color: #EDF2F7; 
+                    color: #1A202C;
+                }
+                QProgressBar::chunk { 
+                    background-color: #3182CE; 
+                    border-radius: 6px; 
+                }
+                
+                QSlider::groove:horizontal { border-radius: 3px; height: 6px; background: #E2E8F0; }
+                QSlider::handle:horizontal { background: #3182CE; width: 14px; margin: -4px 0; border-radius: 7px; }
+                
                 QScrollArea { background: transparent; border: none; }
-                QScrollBar:vertical { background: #ffffff; width: 8px; margin: 0; border-radius: 4px; }
-                QScrollBar::handle:vertical { background: #9ca3af; min-height: 28px; border-radius: 4px; }
-                QScrollBar::handle:vertical:hover { background: #6b7280; }
+                QScrollBar:vertical { background: transparent; width: 6px; margin: 0; border-radius: 3px; }
+                QScrollBar::handle:vertical { background: #CBD5E0; min-height: 20px; border-radius: 3px; }
+                QScrollBar::handle:vertical:hover { background: #A0AEC0; }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-                QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
+
+                /* —— 选中项 / 标签页 / 表格 / 文本框（亮色） —— */
+                QListWidget::item:selected { background-color: #EBF8FF; color: #1E3A8A; font-weight: bold; }
+                QScrollArea > QWidget#qt_scrollarea_viewport { background: transparent; }
+                QScrollArea > QWidget#qt_scrollarea_viewport > QWidget { background: transparent; }
+                QTabWidget::pane { background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; top: -1px; }
+                QTabWidget QStackedWidget { background: transparent; }
+                QTabBar::tab { background: #EDF2F7; color: #4A5568; padding: 7px 16px; margin-right: 2px;
+                               border-top-left-radius: 6px; border-top-right-radius: 6px; }
+                QTabBar::tab:selected { background: #3182CE; color: #FFFFFF; font-weight: bold; }
+                QTabBar::tab:hover:!selected { background: #E2E8F0; color: #1A202C; }
+                QGroupBox { border: 1px solid #E2E8F0; border-radius: 8px; margin-top: 14px; padding-top: 8px; color: #2D3748; }
+                QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #2D3748; }
+                QTableWidget, QTableView { background-color: #FFFFFF; color: #2D3748; gridline-color: #EDF2F7;
+                                           border: 1px solid #E2E8F0; border-radius: 8px;
+                                           selection-background-color: #EBF8FF; selection-color: #1E3A8A; }
+                QHeaderView::section { background-color: #F7FAFC; color: #2D3748; border: none;
+                                       border-right: 1px solid #E2E8F0; padding: 6px; }
+                QTableCornerButton::section { background-color: #F7FAFC; border: none; }
+                QPlainTextEdit, QTextEdit { background-color: #FFFFFF; color: #2D3748;
+                                            border: 1px solid #E2E8F0; border-radius: 6px; }
+                QComboBox QAbstractItemView { background-color: #FFFFFF; color: #2D3748;
+                                              selection-background-color: #EBF8FF; selection-color: #1E3A8A; }
+                QDialog { background-color: #F8F9FA; }
+                QCheckBox, QLabel { background: transparent; }
             """
         self.setStyleSheet(qss)
 
@@ -294,21 +529,22 @@ class ToolboxApp(QMainWindow):
         self.video_tool.save_settings()
         self.img_merge_tool.save_settings()
         self.copyright_tool.save_settings()
+        if hasattr(self, 'l2p_tool'):
+            self.l2p_tool.save_settings()
         self.image_tool.save_settings()
         self.multi_segment_tool.save_settings()
         self.youtube_tool.save_settings()
         self.screenshot_tool.save_settings()
         self.gdrive_tool.save_settings()
+        if hasattr(self, 'duet_tool'):
+            self.duet_tool.save_settings()
         event.accept()
 
 if __name__ == "__main__":
-    # ── 单实例保护（防止多开卡死）──────────────────────────────────────────
-    # 使用 Windows 命名互斥量，确保全局只有一个实例运行
     _MUTEX_NAME = "Global\\VideoToolbox_SingleInstance_v2"
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
     _last_error = ctypes.windll.kernel32.GetLastError()
-    if _last_error == 183:  # ERROR_ALREADY_EXISTS — 已有实例在运行
-        # 需要先创建 QApplication 才能显示对话框
+    if _last_error == 183:
         _tmp_app = QApplication(sys.argv)
         from PyQt6.QtWidgets import QMessageBox
         QMessageBox.warning(
@@ -318,7 +554,6 @@ if __name__ == "__main__":
             "请检查任务栏或系统托盘。",
         )
         sys.exit(0)
-    # ────────────────────────────────────────────────────────────────────────
 
     app = QApplication(sys.argv)
     window = ToolboxApp()

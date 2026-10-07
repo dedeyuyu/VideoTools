@@ -1,0 +1,10 @@
+=== VideoTools Launch Log ===
+Python: 3.13.12 (tags/v3.13.12:1cbe481, Feb  3 2026, 18:22:25) [MSC v.1944 64 bit (AMD64)]
+CWD: D:\Antigravity\VideoTools
+
+[OK] PyQt6
+[OK] PyQt6.QtWidgets
+[OK] PyQt6.QtCore
+[OK] PyQt6.QtGui
+
+[Starting main app...]

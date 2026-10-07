@@ -242,7 +242,7 @@ class FFmpegWorker(QThread):
                 # 保留原声，无背景音乐
                 cmd.extend(['-filter_complex', filter_complex, '-map', '[outv]', '-map', '[outa]'])
 
-            cmd.extend(['-c:v', 'libx264', '-crf', '23', '-preset', 'fast', '-aspect', aspect_str, output_file])
+            cmd.extend(['-c:v', 'libx264', '-crf', '23', '-preset', 'fast', '-aspect', aspect_str, os.path.abspath(output_file)])
 
             try:
                 process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='ignore', creationflags=subprocess.CREATE_NO_WINDOW)

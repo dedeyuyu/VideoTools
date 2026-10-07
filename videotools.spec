@@ -43,12 +43,18 @@ a = Analysis(
         'UI.ui_youtube_downloader',
         'UI.ui_auto_screenshot',
         'UI.ui_gdrive_downloader',
+        'UI.ui_landscape_to_portrait',
         'UI.ui_ffmpeg_downloader_mgr',
         'image_worker.image_merge_worker',
         'image_worker.image_worker',
         'image_worker.ffmpeg_worker',
         'image_worker.audio_library',
+        'image_worker.landscape_portrait_worker',
         'Video.video_manager',
+        'UI.ui_duet_video',
+        'UI.wheel_guard',
+        'image_worker.duet_worker',
+        'image_worker.duet_render',
     ],
 
     hookspath=[],
@@ -56,7 +62,7 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         # Shrink the package by excluding things we definitely don't use
-        'matplotlib', 'numpy', 'pandas', 'scipy', 'tkinter',
+        'pandas', 'tkinter',
         'PySide2', 'PySide6', 'PyQt5',
     ],
     noarchive=False,

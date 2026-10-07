@@ -60,9 +60,19 @@ class GDriveWorker(QThread):
                 pass
 
     # ------------------------------------------------------------------
+    def _ytdlp_exe(self) -> str:
+        """返回 yt-dlp 可执行文件路径，优先使用项目根目录中的版本。"""
+        # 本文件位于 UI/，项目根目录在上一级
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        local = os.path.join(root, "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")
+        if os.path.isfile(local):
+            return local
+        import shutil
+        return shutil.which("yt-dlp") or "yt-dlp"
+
     def _build_args(self, url: str, name: str) -> list[str]:
         """构建单条 yt-dlp 命令参数列表。支持任意文件类型（视频/图片/文档等）。"""
-        args = ["yt-dlp", "--newline", "--no-playlist", "--no-update"]
+        args = [self._ytdlp_exe(), "--newline", "--no-playlist", "--no-update"]
 
         # ffmpeg 路径（仅视频合并时需要，其他文件类型不影响）
         if self.ffmpeg_dir and os.path.isdir(self.ffmpeg_dir):
@@ -76,7 +86,7 @@ class GDriveWorker(QThread):
         # 不指定 -f 格式选择器，让 yt-dlp 自动识别文件类型并以原始格式下载
         # 这样视频、图片、文档等任意 Google Drive 文件都能正常下载
 
-        args.append(url)
+        args.extend(['--', url])
         return args
 
     def _read_stderr(self, proc, stderr_lines: list):

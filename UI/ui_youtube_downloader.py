@@ -19,7 +19,12 @@ from PyQt6.QtGui import QFont, QColor
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _find_exe(name: str) -> str:
-    """返回可执行文件的完整路径，找不到返回空字符串。"""
+    """返回可执行文件的完整路径，优先查找项目根目录，找不到再回退系统 PATH。"""
+    # 优先：项目根目录（本文件位于 UI/，根目录在上一级）
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    local = os.path.join(root, name + (".exe" if sys.platform == "win32" else ""))
+    if os.path.isfile(local):
+        return local
     return shutil.which(name) or ""
 
 
@@ -107,7 +112,7 @@ class YtdlpWorker(QThread):
 
     # ------------------------------------------------------------------
     def _build_args(self) -> list[str]:
-        args = ["yt-dlp", "--newline", "--no-playlist", "--no-update"]
+        args = [_find_exe("yt-dlp") or "yt-dlp", "--newline", "--no-playlist", "--no-update"]
 
         # ffmpeg 路径
         if self.ffmpeg_dir and os.path.isdir(self.ffmpeg_dir):
