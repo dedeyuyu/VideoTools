@@ -716,6 +716,26 @@ class CardEditor(QWidget):
     # ---- 事件 ----
     def _emit(self, *a):
         if not self._loading:
+            # Synchronize bold checkbox and weight combobox
+            sender = self.sender()
+            if sender and "bold" in self.w and "weight" in self.w:
+                if sender == self.w["bold"]:
+                    is_bold = self.w["bold"].isChecked()
+                    # if bold is checked and weight is regular, change to bold
+                    if is_bold and self.w["weight"].currentData() < 600:
+                        idx = self.w["weight"].findData(700)
+                        if idx >= 0: self.w["weight"].setCurrentIndex(idx)
+                    # if bold is unchecked and weight is bold/black, change to regular
+                    elif not is_bold and self.w["weight"].currentData() >= 600:
+                        idx = self.w["weight"].findData(400)
+                        if idx >= 0: self.w["weight"].setCurrentIndex(idx)
+                elif sender == self.w["weight"]:
+                    is_bold = self.w["weight"].currentData() >= 600
+                    if self.w["bold"].isChecked() != is_bold:
+                        self.w["bold"].blockSignals(True)
+                        self.w["bold"].setChecked(is_bold)
+                        self.w["bold"].blockSignals(False)
+
             self.changed.emit()
 
     def _on_font_combo(self, f):
@@ -988,48 +1008,44 @@ class WatermarkItemWidget(QFrame):
         self.txt_text.textChanged.connect(self._on_change)
         form_text.addRow("文本内容:", self.txt_text)
         
-        row_font = QHBoxLayout()
         self.cmb_font = QFontComboBox()
         self.cmb_font.setCurrentFont(QFont(self.cfg.get("font_family", "Microsoft YaHei")))
         self.cmb_font.currentFontChanged.connect(self._on_change)
-        row_font.addWidget(self.cmb_font, 1)
+        form_text.addRow("字体:", self.cmb_font)
         
+        row_fs = QHBoxLayout()
         self.spin_fs = QSpinBox()
         self.spin_fs.setRange(6, 400)
         self.spin_fs.setValue(int(self.cfg.get("font_size", 32)))
         self.spin_fs.valueChanged.connect(self._on_change)
-        row_font.addWidget(QLabel("字号:"))
-        row_font.addWidget(self.spin_fs)
+        row_fs.addWidget(self.spin_fs)
         
         self.btn_color = ColorButton(self.cfg.get("color", "#FFFFFF"))
         self.btn_color.colorChanged.connect(self._on_change)
-        row_font.addWidget(QLabel("颜色:"))
-        row_font.addWidget(self.btn_color)
-        form_text.addRow("字体设置:", row_font)
+        row_fs.addWidget(QLabel("颜色:"))
+        row_fs.addWidget(self.btn_color)
         
-        row_alpha = QHBoxLayout()
         self.spin_t_alpha = QSpinBox()
         self.spin_t_alpha.setRange(0, 100)
         self.spin_t_alpha.setValue(int(self.cfg.get("text_opacity", 100)))
         self.spin_t_alpha.valueChanged.connect(self._on_change)
-        row_alpha.addWidget(QLabel("字透明度:"))
-        row_alpha.addWidget(self.spin_t_alpha)
-        row_alpha.addWidget(QLabel("%"))
+        row_fs.addWidget(QLabel("透明%: "))
+        row_fs.addWidget(self.spin_t_alpha)
+        form_text.addRow("字号颜色:", row_fs)
         
+        row_bg = QHBoxLayout()
         self.btn_bg = ColorButton(self.cfg.get("bg_color", "#000000"))
         self.btn_bg.colorChanged.connect(self._on_change)
-        row_alpha.addWidget(QLabel("底色:"))
-        row_alpha.addWidget(self.btn_bg)
+        row_bg.addWidget(self.btn_bg)
         
         self.spin_b_alpha = QSpinBox()
         self.spin_b_alpha.setRange(0, 100)
         self.spin_b_alpha.setValue(int(self.cfg.get("bg_opacity", 50)))
         self.spin_b_alpha.valueChanged.connect(self._on_change)
-        row_alpha.addWidget(QLabel("底透明度:"))
-        row_alpha.addWidget(self.spin_b_alpha)
-        row_alpha.addWidget(QLabel("%"))
-        row_alpha.addStretch()
-        form_text.addRow("颜色透明:", row_alpha)
+        row_bg.addWidget(QLabel("底透明%: "))
+        row_bg.addWidget(self.spin_b_alpha)
+        row_bg.addStretch()
+        form_text.addRow("底色:", row_bg)
         
         self.stack.addWidget(self.page_text)
         
@@ -1047,63 +1063,61 @@ class WatermarkItemWidget(QFrame):
         row_file.addWidget(btn_pick)
         form_img.addRow("图片文件:", row_file)
         
-        row_img_opt = QHBoxLayout()
         self.spin_scale = QSpinBox()
         self.spin_scale.setRange(1, 1000)
         self.spin_scale.setValue(int(self.cfg.get("scale", 30)))
         self.spin_scale.valueChanged.connect(self._on_change)
-        row_img_opt.addWidget(QLabel("缩放:"))
-        row_img_opt.addWidget(self.spin_scale)
-        row_img_opt.addWidget(QLabel("%"))
+        form_img.addRow("缩放(%):", self.spin_scale)
         
         self.spin_i_alpha = QSpinBox()
         self.spin_i_alpha.setRange(0, 100)
         self.spin_i_alpha.setValue(int(self.cfg.get("opacity", 100)))
         self.spin_i_alpha.valueChanged.connect(self._on_change)
-        row_img_opt.addWidget(QLabel("透明度:"))
-        row_img_opt.addWidget(self.spin_i_alpha)
-        row_img_opt.addWidget(QLabel("%"))
+        form_img.addRow("透明度(%):", self.spin_i_alpha)
         
+        row_flip = QHBoxLayout()
         self.chk_fh = QCheckBox("左右翻转")
         self.chk_fh.setChecked(self.cfg.get("flip_h", False))
         self.chk_fh.toggled.connect(self._on_change)
-        row_img_opt.addWidget(self.chk_fh)
+        row_flip.addWidget(self.chk_fh)
         
         self.chk_fv = QCheckBox("上下翻转")
         self.chk_fv.setChecked(self.cfg.get("flip_v", False))
         self.chk_fv.toggled.connect(self._on_change)
-        row_img_opt.addWidget(self.chk_fv)
-        row_img_opt.addStretch()
-        form_img.addRow("图片设置:", row_img_opt)
+        row_flip.addWidget(self.chk_fv)
+        row_flip.addStretch()
+        form_img.addRow("翻转:", row_flip)
         
         self.stack.addWidget(self.page_img)
         
         # Common Position
-        row_pos = QHBoxLayout()
+        form_pos = QFormLayout()
+        
         self.cmb_pos = QComboBox()
         for v, t in [("tl", "左上"), ("tr", "右上"), ("bl", "左下"), ("br", "右下"), ("bc", "居中")]:
             self.cmb_pos.addItem(t, v)
         self.cmb_pos.setCurrentIndex(max(0, self.cmb_pos.findData(self.cfg.get("position", "br"))))
         self.cmb_pos.currentIndexChanged.connect(self._on_change)
-        row_pos.addWidget(QLabel("位置:"))
-        row_pos.addWidget(self.cmb_pos)
+        form_pos.addRow("位置:", self.cmb_pos)
         
+        row_xy = QHBoxLayout()
         self.spin_ox = QSpinBox()
         self.spin_ox.setRange(-2000, 2000)
         self.spin_ox.setValue(int(self.cfg.get("ox", 0)))
         self.spin_ox.valueChanged.connect(self._on_change)
-        row_pos.addWidget(QLabel("偏移X:"))
-        row_pos.addWidget(self.spin_ox)
+        row_xy.addWidget(QLabel("X:"))
+        row_xy.addWidget(self.spin_ox)
         
         self.spin_oy = QSpinBox()
         self.spin_oy.setRange(-2000, 2000)
         self.spin_oy.setValue(int(self.cfg.get("oy", 0)))
         self.spin_oy.valueChanged.connect(self._on_change)
-        row_pos.addWidget(QLabel("Y:"))
-        row_pos.addWidget(self.spin_oy)
-        row_pos.addStretch()
+        row_xy.addWidget(QLabel("Y:"))
+        row_xy.addWidget(self.spin_oy)
+        row_xy.addStretch()
+        form_pos.addRow("偏移:", row_xy)
         
-        self.vbox.addLayout(row_pos)
+        self.vbox.addLayout(form_pos)
         
         self._sync_type()
         self._updating = False

@@ -369,6 +369,8 @@ class ToolboxApp(QMainWindow):
                 QComboBox QAbstractItemView { background-color: #1A1A1A; color: #E0E0E0;
                                               selection-background-color: #2D3748; selection-color: #FFFFFF; }
                 QDialog { background-color: #1A1A1A; }
+
+
                 QCheckBox, QLabel { background: transparent; }
             """
         else:
@@ -522,6 +524,16 @@ class ToolboxApp(QMainWindow):
                 QDialog { background-color: #F8F9FA; }
                 QCheckBox, QLabel { background: transparent; }
             """
+            import os
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            icon_dir = os.path.join(base_dir, "theme_icons").replace("\\", "/")
+            qss += f"""
+                QCheckBox::indicator {{ width: 16px; height: 16px; image: url('{icon_dir}/checkbox_unchecked.svg'); }}
+                QCheckBox::indicator:checked {{ image: url('{icon_dir}/checkbox_checked.svg'); }}
+                QRadioButton::indicator {{ width: 16px; height: 16px; image: url('{icon_dir}/radio_unchecked.svg'); }}
+                QRadioButton::indicator:checked {{ image: url('{icon_dir}/radio_checked.svg'); }}
+            """
+            
         self.setStyleSheet(qss)
 
     def closeEvent(self, event):
