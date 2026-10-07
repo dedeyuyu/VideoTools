@@ -342,8 +342,8 @@ class ToolboxApp(QMainWindow):
                 
                 QScrollArea { background: transparent; border: none; }
                 QScrollBar:vertical { background: transparent; width: 6px; margin: 0; border-radius: 3px; }
-                QScrollBar::handle:vertical { background: #333333; min-height: 20px; border-radius: 3px; }
-                QScrollBar::handle:vertical:hover { background: #555555; }
+                QScrollBar::handle:vertical { background: #ECC94B; min-height: 20px; border-radius: 3px; }
+                QScrollBar::handle:vertical:hover { background: #D69E2E; }
                 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 
                 /* —— 选中项 / 标签页 / 表格 / 文本框（暗色） —— */
