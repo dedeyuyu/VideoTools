@@ -22,8 +22,8 @@ from PyQt6.QtWidgets import (QApplication,
     QInputDialog, QColorDialog, QFontComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSizePolicy, QAbstractItemView, QStyledItemDelegate, QStyle,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QRectF, QSize, QUrl
-from PyQt6.QtGui import QImage, QPainter, QColor, QPen, QFont, QDesktopServices, QFontDatabase, QPalette
+from PyQt6.QtCore import Qt, QThread, QPoint, pyqtSignal, QTimer, QRectF, QSize, QUrl
+from PyQt6.QtGui import QImage, QIcon, QPixmap, QPainterPath, QPainter, QColor, QPen, QFont, QDesktopServices, QFontDatabase, QPalette
 
 from image_worker.duet_worker import (
     get_data_dir, get_cache_dir, probe_info, align_person_video, extract_frame_png,
