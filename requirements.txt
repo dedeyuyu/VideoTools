@@ -1,6 +1,6 @@
 PyQt6>=6.4.0
 Pillow>=10.3.0
-numpy>=1.24.0
+numpy>=2.5.3
 opencv-contrib-python>=4.8.0
 mediapipe==0.10.21
 yt-dlp>=2024.4.9
