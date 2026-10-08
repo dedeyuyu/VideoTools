@@ -1,0 +1,47 @@
+DEFAULT_TEMPLATES = [
+    {
+        "name": "默认上下分屏",
+        "order": "viral_top",
+        "split": 0.5125,
+        "top": {
+            "fill": "width",
+            "ox": 0,
+            "oy": 312
+        },
+        "bottom": {
+            "fill": "height",
+            "ox": 71,
+            "oy": 0
+        }
+    },
+    {
+        "name": "人物 下 常用",
+        "order": "viral_top",
+        "split": 0.5067708333333333,
+        "top": {
+            "fill": "width",
+            "ox": 0,
+            "oy": 332
+        },
+        "bottom": {
+            "fill": "height",
+            "ox": 71,
+            "oy": 0
+        }
+    },
+    {
+        "name": "邓羽常用",
+        "order": "viral_top",
+        "split": 0.5208333333333334,
+        "top": {
+            "fill": "width",
+            "ox": 0,
+            "oy": 400
+        },
+        "bottom": {
+            "fill": "height",
+            "ox": 20,
+            "oy": 0
+        }
+    }
+]

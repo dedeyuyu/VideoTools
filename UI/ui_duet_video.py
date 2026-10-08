@@ -43,6 +43,14 @@ SAMPLE_PHONE = "【示例】电话 400-000-0000"
 #  通用小工具
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _get_all_presets():
+    from UI.default_presets import DEFAULT_PRESETS
+    import copy
+    presets = copy.deepcopy(DEFAULT_PRESETS)
+    presets.update(_load_json("card_presets.json", {}))
+    return presets
+
+
 def _load_json(name, default):
     path = os.path.join(get_data_dir(), name)
     try:
@@ -894,7 +902,7 @@ class CardEditor(QWidget):
 
     # ---- 预设（卡片库） ----
     def reload_presets(self):
-        presets = _load_json("card_presets.json", {})
+        presets = _get_all_presets()
         self.cmb_preset.blockSignals(True)
         self.cmb_preset.clear()
         self.cmb_preset.addItem("— 选择预设 —", None)
@@ -955,7 +963,7 @@ class CardEditor(QWidget):
         name = self.cmb_preset.itemData(idx)
         if not name:
             return
-        presets = _load_json("card_presets.json", {})
+        presets = _get_all_presets()
         if name in presets:
             cfg = dict(presets[name])
             cfg["time"] = self.w["time"].value()   # 时间线不随预设改变
@@ -1286,7 +1294,13 @@ class DuetVideoUI(QWidget):
         self._render_thread = None
         self.cur_task = 0
 
-        self.templates = _load_json("templates.json", [])
+        user_saved = _load_json("templates.json", None)
+        if user_saved is None:
+            from UI.default_templates import DEFAULT_TEMPLATES
+            import copy
+            self.templates = copy.deepcopy(DEFAULT_TEMPLATES)
+        else:
+            self.templates = user_saved
         if not self.templates:
             self.templates = [default_template()]
             _save_json("templates.json", self.templates)
