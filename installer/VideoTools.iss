@@ -6,7 +6,7 @@
 ; ============================================================
 
 #define MyAppName      "视频集成工具"
-#define MyAppVersion   "1.5.3"
+#define MyAppVersion   "1.5.4"
 #define MyAppPublisher "VideoTools"
 #define MyAppExeName   "VideoTools.exe"
 #define MyAppURL       "https://github.com"
@@ -59,6 +59,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 Source: "..\打包\VideoTools.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\打包\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\打包\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 ; 日志图标
 Source: "..\log\log.ico"; DestDir: "{app}\log"; Flags: ignoreversion
