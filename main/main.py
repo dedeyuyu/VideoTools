@@ -45,7 +45,7 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.5.0")
+        self.setWindowTitle("视频集成工具 v1.5.2")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -553,7 +553,16 @@ class ToolboxApp(QMainWindow):
         event.accept()
 
 if __name__ == "__main__":
+    import ctypes
+    # Fix taskbar icon issue on Windows
+    try:
+        myappid = 'videotools.app.v1'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    except Exception:
+        pass
+
     _MUTEX_NAME = "Global\\VideoToolbox_SingleInstance_v2"
+    ctypes.windll.kernel32.SetLastError(0)
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
     _last_error = ctypes.windll.kernel32.GetLastError()
     if _last_error == 183:
