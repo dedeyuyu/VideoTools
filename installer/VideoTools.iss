@@ -6,7 +6,7 @@
 ; ============================================================
 
 #define MyAppName      "视频集成工具"
-#define MyAppVersion   "1.5.2"
+#define MyAppVersion   "1.5.3"
 #define MyAppPublisher "VideoTools"
 #define MyAppExeName   "VideoTools.exe"
 #define MyAppURL       "https://github.com"
@@ -69,11 +69,11 @@ Name: "{app}\ffmpeg"
 
 [Icons]
 ; 开始菜单
-Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\log\log.ico"
+Name: "{group}\{#MyAppName}";          Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\_internal\log\log.ico"
 Name: "{group}\卸载 {#MyAppName}";     Filename: "{uninstallexe}"
 
 ; 桌面快捷方式（可选）
-Name: "{autodesktop}\{#MyAppName}";    Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\log\log.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}";    Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\_internal\log\log.ico"; Tasks: desktopicon
 
 [Run]
 ; 安装完成后自动启动

@@ -45,7 +45,7 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.5.2")
+        self.setWindowTitle("视频集成工具 v1.5.3")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -566,17 +566,30 @@ if __name__ == "__main__":
     _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
     _last_error = ctypes.windll.kernel32.GetLastError()
     if _last_error == 183:
-        _tmp_app = QApplication(sys.argv)
-        from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.warning(
-            None,
-            "软件已在运行",
-            "「视频集成工具」已经在运行中，请勿重复打开。\n\n"
-            "请检查任务栏或系统托盘。",
-        )
+        # Instead of showing a popup, try to bring the existing window to front
+        hwnd = ctypes.windll.user32.FindWindowW(None, "视频集成工具 v1.5.3")
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
         sys.exit(0)
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico"))))
+    
+    from PyQt6.QtWidgets import QSplashScreen
+    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtCore import Qt
+    splash_pix = QPixmap(resource_path(os.path.join("log", "log.ico")))
+    if not splash_pix.isNull():
+        splash_pix = splash_pix.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint)
+        splash.show()
+        app.processEvents()
+    else:
+        splash = None
+
     window = ToolboxApp()
     window.show()
+    if splash:
+        splash.finish(window)
     sys.exit(app.exec())
