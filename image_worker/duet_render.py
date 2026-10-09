@@ -473,15 +473,49 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
     max_w = float(cfg.get("width", 960))
     col, hl_col = cfg.get("color", "#FFFFFF"), cfg.get("hl_color", "#FFD400")
 
+    sub_enabled = bool(cfg.get("sub_enabled"))
+    if sub_enabled:
+        sub_font_cfg = dict(cfg)
+        sub_font_cfg["size"] = cfg.get("sub_size", cfg.get("size", 40))
+        sub_actual_font = _make_font(sub_font_cfg)
+        sub_color_val = cfg.get("sub_color", "#FFFFFF")
+        sub_hl_color_val = cfg.get("sub_hl_color", hl_col)
+    else:
+        sub_actual_font = main_font
+        sub_color_val = col
+        sub_hl_color_val = hl_col
+
     def make_lines(s, font, color, kind, avail):
         out = []
         if not s.strip():
             return out
-        fm = QFontMetricsF(font)
+        
         mask = _hl_mask(s, cfg) if kind == "main" else [False] * len(s)
-        for a, b in _wrap(s, fm, avail, bool(cfg.get("wrap", True))):
-            out.append(_Line(s[a:b], font, color, hl_col, mask[a:b], kind))
-        return out
+        do_wrap = bool(cfg.get("wrap", True))
+        
+        if kind == "main" and sub_enabled:
+            # Wrap first line using main_font
+            fm_main_local = QFontMetricsF(font)
+            wrap_indices = _wrap(s, fm_main_local, avail, do_wrap)
+            if not wrap_indices: return out
+            
+            a, b = wrap_indices[0]
+            out.append(_Line(s[a:b], font, color, hl_col, mask[a:b], "main"))
+            
+            # Wrap remaining text using sub_font
+            if b < len(s):
+                rem_text = s[b:].lstrip()
+                if rem_text:
+                    fm_sub = QFontMetricsF(sub_actual_font)
+                    rem_mask = _hl_mask(rem_text, cfg)
+                    for sa, sb in _wrap(rem_text, fm_sub, avail, do_wrap):
+                        out.append(_Line(rem_text[sa:sb], sub_actual_font, sub_color_val, sub_hl_color_val, rem_mask[sa:sb], "sub_line"))
+            return out
+        else:
+            fm = QFontMetricsF(font)
+            for a, b in _wrap(s, fm, avail, do_wrap):
+                out.append(_Line(s[a:b], font, color, hl_col, mask[a:b], kind))
+            return out
 
     icon_in_main = icon == "whatsapp" and split != "horizontal"
     main_avail = max_w - (2 * icon_r + gap if icon_in_main else 0)
@@ -500,7 +534,12 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
         return w, y - top
 
     # 组织分区：每个分区 = {'lines': [...], 'icon': bool, 'arrow': bool}
-    if split == "vertical":
+    if sub_enabled and split == "vertical":
+        # First line goes to section 0, the rest to section 1
+        line1 = [main_lines[0]] if main_lines else []
+        rest = main_lines[1:] if len(main_lines) > 1 else []
+        sections = [{"lines": lead_lines + line1, "icon": False}, {"lines": rest + sub_lines, "icon": icon_in_main}]
+    elif split == "vertical":
         sections = [{"lines": lead_lines, "icon": False}, {"lines": main_lines + sub_lines, "icon": icon_in_main}]
     elif split == "horizontal":
         sections = [{"lines": [], "icon": icon != "none", "arrow": icon == "whatsapp_arrow"},
@@ -663,7 +702,8 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
 
     # ── 2) 文字路径（按颜色分组） ──
     color_paths = {}
-    full = QPainterPath()
+    full_main = QPainterPath()
+    full_sub = QPainterPath()
     rtl = bool(cfg.get("rtl"))
     for ln in all_lines:
         baseline = ln.y + ln.fm.ascent()
@@ -684,13 +724,19 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
             path.addText(QPointF(cur, baseline), ln.font, s)
             key = ln.hl_color if is_hl else ln.color
             color_paths.setdefault(key, QPainterPath()).addPath(path)
-            full.addPath(path)
+            if ln.kind == "sub_line":
+                full_sub.addPath(path)
+            else:
+                full_main.addPath(path)
             if not rtl:
                 cur += rw
 
     base_sw = float(cfg.get("stroke_width", 6)) if cfg.get("stroke") else 0.0
     ms_extra = float(cfg.get("ms_step", 6)) * int(cfg.get("ms_layers", 2)) if cfg.get("multi_stroke") else 0.0
     outline_w = (base_sw + ms_extra) * 2
+
+    sub_sw = float(cfg.get("sub_stroke_width", 6)) if cfg.get("sub_stroke") else 0.0
+    sub_outline_w = sub_sw * 2
 
     def round_pen(color, w):
         return QPen(color, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
@@ -700,15 +746,22 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
         sc = QColor(cfg.get("shadow_color", "#000000"))
 
         def _shadow(q):
-            q.fillPath(full, sc)
-            if outline_w > 0:
-                q.strokePath(full, round_pen(sc, outline_w))
-        b = full.boundingRect().adjusted(-outline_w, -outline_w, outline_w, outline_w)
+            if not full_main.isEmpty():
+                q.fillPath(full_main, sc)
+                if outline_w > 0:
+                    q.strokePath(full_main, round_pen(sc, outline_w))
+            if not full_sub.isEmpty():
+                q.fillPath(full_sub, sc)
+                if sub_outline_w > 0:
+                    q.strokePath(full_sub, round_pen(sc, sub_outline_w))
+                    
+        full = full_main.united(full_sub)
+        b = full.boundingRect().adjusted(-max(outline_w, sub_outline_w), -max(outline_w, sub_outline_w), max(outline_w, sub_outline_w), max(outline_w, sub_outline_w))
         _draw_blurred(p, _shadow, b, cfg.get("shadow_blur", 6), cfg.get("shadow_x", 4), cfg.get("shadow_y", 4),
                       float(cfg.get("shadow_alpha", 100)) / 100.0)
 
-    # ── 4) 多层扩展描边 ──
-    if cfg.get("multi_stroke"):
+    # ── 4) 多层扩展描边 (仅限主样式) ──
+    if cfg.get("multi_stroke") and not full_main.isEmpty():
         layers = max(1, int(cfg.get("ms_layers", 2)))
         step = float(cfg.get("ms_step", 6))
         feather = max(0, int(cfg.get("ms_feather", 0)))
@@ -717,13 +770,15 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
             colr = QColor(colors[min(k - 1, len(colors) - 1)])
             w = (base_sw + step * k) * 2
             if feather:
-                _draw_blurred(p, lambda q, c=colr, ww=w: q.strokePath(full, round_pen(c, ww)),
-                              full.boundingRect().adjusted(-w, -w, w, w), feather, 0, 0, 1.0)
-            p.strokePath(full, round_pen(colr, w))
+                _draw_blurred(p, lambda q, c=colr, ww=w: q.strokePath(full_main, round_pen(c, ww)),
+                              full_main.boundingRect().adjusted(-w, -w, w, w), feather, 0, 0, 1.0)
+            p.strokePath(full_main, round_pen(colr, w))
 
     # ── 5) 基础描边 ──
-    if base_sw > 0:
-        p.strokePath(full, round_pen(QColor(cfg.get("stroke_color", "#000000")), base_sw * 2))
+    if base_sw > 0 and not full_main.isEmpty():
+        p.strokePath(full_main, round_pen(QColor(cfg.get("stroke_color", "#000000")), base_sw * 2))
+    if sub_sw > 0 and not full_sub.isEmpty():
+        p.strokePath(full_sub, round_pen(QColor(cfg.get("sub_stroke_color", "#000000")), sub_sw * 2))
 
     # ── 6) 填充 ──
     for key, path in color_paths.items():

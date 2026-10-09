@@ -665,6 +665,19 @@ class CardEditor(QWidget):
         self._add(g, "hl_numbers", "check", "数字高亮")
         self._add(g, "hl_english", "check", "英文高亮")
 
+
+        g = self._group("🅱 换行后独立样式 (双色底框)")
+        self._add(g, "sub_enabled", "check", "启用首行/次行独立排版")
+        self._add(g, "split", "combo", "底框拆分模式", items=[("none", "单色连体"), ("vertical", "上下双色分离")])
+        self._add(g, "split_color2", "color", "次行底框颜色")
+        self._add(g, "split_alpha2", "spin", "次行底框透明度", rng=(0, 255))
+        self._add(g, "sub_size", "spin", "次行字号", rng=(6, 400))
+        self._add(g, "sub_color", "color", "次行文本颜色")
+        self._add(g, "sub_hl_color", "color", "次行高亮颜色")
+        self._add(g, "sub_stroke", "check", "次行启用描边")
+        self._add(g, "sub_stroke_color", "color", "次行描边颜色")
+        self._add(g, "sub_stroke_width", "spin", "次行描边宽度", rng=(0, 60))
+
         g = self._group("✒ 描边与特效")
         self._add(g, "stroke", "check", "启用基础描边")
         self._add(g, "stroke_color", "color", "描边颜色")
