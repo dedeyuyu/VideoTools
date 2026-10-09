@@ -86,6 +86,7 @@ def default_card(kind: str = "title") -> dict:
         # 结构（引导语 / 副文本 / 双色拼接 / 图标）
         "lead_text": "", "lead_color": "#FFFFFF", "lead_scale": 50, "lead_inline": False,
         "sub_text": "", "sub_color": "#FFFFFF", "sub_scale": 40,
+        "sub_enabled": False, "sub_size": 40, "sub_hl_color": "#FFD400", "sub_stroke": True, "sub_stroke_color": "#000000", "sub_stroke_width": 6,
         "split": "none", "split_color2": "#FFFFFF", "split_alpha2": 255,
         "icon": "none",
         "underline": False, "underline_color": "#25D366", "underline_w": 4,
