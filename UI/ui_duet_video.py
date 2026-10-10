@@ -1101,23 +1101,23 @@ class CardEditor(QWidget):
             self.reload_presets()
 
     def _export_preset(self):
-        name = self.cmb_preset.currentData()
-        if not name:
-            return
         import json
         from PyQt6.QtWidgets import QFileDialog
         
-        cfg = self.get_cfg()
-        cfg["_kind"] = self.kind
-        
-        save_path, _ = QFileDialog.getSaveFileName(self, "导出预设", f"{name}.json", "JSON Files (*.json)")
+        # 导出所有的预设（包括默认和用户自定义的）
+        presets = _get_all_presets()
+        if not presets:
+            QMessageBox.warning(self, "提示", "当前没有任何预设可导出。")
+            return
+            
+        save_path, _ = QFileDialog.getSaveFileName(self, "导出所有预设", "全部预设备份.json", "JSON Files (*.json)")
         if not save_path:
             return
             
         try:
-            with codecs.open(save_path, 'w', 'utf-8') as f:
-                json.dump({name: cfg}, f, ensure_ascii=False, indent=4)
-            QMessageBox.information(self, "成功", f"预设 '{name}' 已成功导出！")
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(presets, f, ensure_ascii=False, indent=4)
+            QMessageBox.information(self, "成功", f"成功导出了 {len(presets)} 个预设！\n（包含内置预设及自定义预设）")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出失败: {e}")
 
@@ -1134,7 +1134,7 @@ class CardEditor(QWidget):
         
         for p in open_paths:
             try:
-                with codecs.open(p, 'r', 'utf-8') as f:
+                with open(p, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     
                 # 检查是单个预设字典还是包含了多个预设的字典

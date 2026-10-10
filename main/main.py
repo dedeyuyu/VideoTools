@@ -45,7 +45,7 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.5.9")
+        self.setWindowTitle("视频集成工具 v1.5.10")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -567,7 +567,7 @@ if __name__ == "__main__":
     _last_error = ctypes.windll.kernel32.GetLastError()
     if _last_error == 183:
         # Instead of showing a popup, try to bring the existing window to front
-        hwnd = ctypes.windll.user32.FindWindowW(None, "视频集成工具 v1.5.9")
+        hwnd = ctypes.windll.user32.FindWindowW(None, "视频集成工具 v1.5.10")
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE
             ctypes.windll.user32.SetForegroundWindow(hwnd)
