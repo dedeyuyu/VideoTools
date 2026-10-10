@@ -605,16 +605,61 @@ class CardEditor(QWidget):
         self.cmb_preset = QComboBox()
         self.cmb_preset.setMinimumWidth(120)
         self.cmb_preset.activated.connect(self._apply_preset)
-        b_save = QPushButton("💾 存为预设")
-        b_save.clicked.connect(self._save_preset)
-        b_del = QPushButton("🗑")
-        b_del.setFixedWidth(36)
-        b_del.setToolTip("删除选中的预设")
-        b_del.clicked.connect(self._del_preset)
+        
         pr.addWidget(QLabel("预设:"))
         pr.addWidget(self.cmb_preset, 1)
-        pr.addWidget(b_save)
+        
+        import os
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        
+        b_rename = QPushButton()
+        b_rename.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "rename.svg")))
+        b_rename.setFixedSize(32, 32)
+        b_rename.setToolTip("重命名当前预设")
+        b_rename.clicked.connect(self._rename_preset)
+        pr.addWidget(b_rename)
+        
+        b_update = QPushButton()
+        b_update.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "update.svg")))
+        b_update.setFixedSize(32, 32)
+        b_update.setToolTip("将当前修改更新到此预设")
+        b_update.clicked.connect(self._update_preset)
+        pr.addWidget(b_update)
+        
+        b_save_as = QPushButton()
+        b_save_as.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "save_as.svg")))
+        b_save_as.setFixedSize(32, 32)
+        b_save_as.setToolTip("另存为新的预设")
+        b_save_as.clicked.connect(self._save_preset)
+        pr.addWidget(b_save_as)
+        
+        b_del = QPushButton()
+        b_del.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "delete.svg")))
+        b_del.setFixedSize(32, 32)
+        b_del.setToolTip("删除选中的预设")
+        b_del.clicked.connect(self._del_preset)
         pr.addWidget(b_del)
+        
+        # 加一个竖线分隔符
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.VLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        pr.addWidget(line)
+        
+        b_import = QPushButton()
+        b_import.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "import.svg")))
+        b_import.setFixedSize(32, 32)
+        b_import.setToolTip("导入预设 (支持导入单个或批量预设文件)")
+        b_import.clicked.connect(self._import_preset)
+        pr.addWidget(b_import)
+        
+        b_export = QPushButton()
+        b_export.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "export.svg")))
+        b_export.setFixedSize(32, 32)
+        b_export.setToolTip("导出当前选中的预设")
+        b_export.clicked.connect(self._export_preset)
+        pr.addWidget(b_export)
+        
         outer.addLayout(pr)
 
         scroll = QScrollArea()
@@ -982,15 +1027,10 @@ class CardEditor(QWidget):
             cfg["time"] = self.w["time"].value()   # 时间线不随预设改变
             self.set_cfg(cfg)
 
-    def _save_preset(self):
-        name, ok = QInputDialog.getText(self, "保存卡片预设", "预设名称（含文字样式 / 图片缩放与位置）:")
-        if not ok or not name.strip():
-            return
-        presets = _load_json("card_presets.json", {})
+    def _get_preset_cfg_to_save(self):
         cfg = self.get_cfg()
         cfg["_kind"] = self.kind
         cfg["_is_user"] = True
-        # 图片 / 字体复制到软件目录的卡片库，原文件被删除或移动也不影响预设
         try:
             if cfg.get("image_path"):
                 cfg["image_path"] = _persist_file(cfg["image_path"])
@@ -1001,24 +1041,121 @@ class CardEditor(QWidget):
                 load_font_file(self._font_file)
         except Exception as e:
             QMessageBox.warning(self, "复制失败", f"无法把文件保存到卡片库：{e}")
-        presets[name.strip()] = cfg
+        return cfg
+
+    def _save_preset(self):
+        name, ok = QInputDialog.getText(self, "另存为预设", "新预设名称:")
+        if not ok or not name.strip():
+            return
+        presets = _load_json("card_presets.json", {})
+        presets[name.strip()] = self._get_preset_cfg_to_save()
         _save_json("card_presets.json", presets)
         self.reload_presets()
         self.cmb_preset.setCurrentIndex(self.cmb_preset.findData(name.strip()))
+
+    def _update_preset(self):
+        name = self.cmb_preset.currentData()
+        if not name:
+            return
+        presets = _load_json("card_presets.json", {})
+        if name not in presets or presets.get(name, {}).get("_is_user") is False:
+            QMessageBox.warning(self, "提示", "这是内置默认预设，无法更新。请使用【另存为】创建新预设。")
+            return
+        presets[name] = self._get_preset_cfg_to_save()
+        _save_json("card_presets.json", presets)
+        QMessageBox.information(self, "成功", f"预设 '{name}' 已更新！")
+
+    def _rename_preset(self):
+        old_name = self.cmb_preset.currentData()
+        if not old_name:
+            return
+        presets = _load_json("card_presets.json", {})
+        if old_name not in presets or presets.get(old_name, {}).get("_is_user") is False:
+            QMessageBox.warning(self, "提示", "这是内置默认预设，无法重命名。")
+            return
+        new_name, ok = QInputDialog.getText(self, "重命名预设", "新名称:", text=old_name)
+        if not ok or not new_name.strip() or new_name.strip() == old_name:
+            return
+        new_name = new_name.strip()
+        if new_name in presets:
+            QMessageBox.warning(self, "提示", "该名称已存在！")
+            return
+        presets[new_name] = presets.pop(old_name)
+        _save_json("card_presets.json", presets)
+        self.reload_presets()
+        self.cmb_preset.setCurrentIndex(self.cmb_preset.findData(new_name))
 
     def _del_preset(self):
         name = self.cmb_preset.currentData()
         if not name:
             return
-        # 不能删除默认预设
         presets = _load_json("card_presets.json", {})
-        if presets.get(name, {}).get("_is_user") is False or name.startswith("热门 -"):
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "提示", "无法删除默认预设。")
+        if name not in presets or presets.get(name, {}).get("_is_user") is False:
+            QMessageBox.warning(self, "提示", "这是内置默认预设，无法删除。")
             return
-        presets.pop(name, None)
-        _save_json("card_presets.json", presets)
-        self.reload_presets()
+        reply = QMessageBox.question(self, "确认删除", f"确定要删除预设 '{name}' 吗？",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            presets.pop(name, None)
+            _save_json("card_presets.json", presets)
+            self.reload_presets()
+
+    def _export_preset(self):
+        name = self.cmb_preset.currentData()
+        if not name:
+            return
+        import json
+        from PyQt6.QtWidgets import QFileDialog
+        
+        cfg = self.get_cfg()
+        cfg["_kind"] = self.kind
+        
+        save_path, _ = QFileDialog.getSaveFileName(self, "导出预设", f"{name}.json", "JSON Files (*.json)")
+        if not save_path:
+            return
+            
+        try:
+            with codecs.open(save_path, 'w', 'utf-8') as f:
+                json.dump({name: cfg}, f, ensure_ascii=False, indent=4)
+            QMessageBox.information(self, "成功", f"预设 '{name}' 已成功导出！")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败: {e}")
+
+    def _import_preset(self):
+        import json
+        from PyQt6.QtWidgets import QFileDialog
+        
+        open_paths, _ = QFileDialog.getOpenFileNames(self, "导入预设", "", "JSON Files (*.json)")
+        if not open_paths:
+            return
+            
+        presets = _load_json("card_presets.json", {})
+        imported_count = 0
+        
+        for p in open_paths:
+            try:
+                with codecs.open(p, 'r', 'utf-8') as f:
+                    data = json.load(f)
+                    
+                # 检查是单个预设字典还是包含了多个预设的字典
+                if "_kind" in data:  # 这是一个裸的预设数据，没有外层名称，用文件名当名称
+                    name = os.path.splitext(os.path.basename(p))[0]
+                    data["_is_user"] = True
+                    presets[name] = data
+                    imported_count += 1
+                else: # 这是一个包含多个预设的字典
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            v["_is_user"] = True
+                            presets[k] = v
+                            imported_count += 1
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"读取文件 {os.path.basename(p)} 失败: {e}")
+                
+        if imported_count > 0:
+            _save_json("card_presets.json", presets)
+            self.reload_presets()
+            QMessageBox.information(self, "成功", f"成功导入了 {imported_count} 个预设！")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -6,7 +6,7 @@ token = "REMOVED_TOKEN"
 repo_owner = "dedeyuyu"
 repo_name = "VideoTools"
 
-installer_path = "output_installer/VideoTools_v1.5.8_Setup.exe"
+installer_path = "output_installer/VideoTools_v1.5.9_Setup.exe"
 
 headers = {
     "Authorization": f"token {token}",
@@ -15,8 +15,8 @@ headers = {
 
 # Create release
 release_payload = {
-    "tag_name": "v1.5.8",
-    "name": "VideoTools Release v1.5.8",
+    "tag_name": "v1.5.9",
+    "name": "VideoTools Release v1.5.9",
     "body": "打包的独立安装包。其他人可以直接下载安装，无需配置 Python 环境即可直接运行本软件。",
     "draft": False,
     "prerelease": False
@@ -46,7 +46,7 @@ headers_upload = {
 
 with open(installer_path, "rb") as f:
     upload_resp = requests.post(
-        f"{upload_url}?name=VideoTools_v1.5.8_Setup.exe",
+        f"{upload_url}?name=VideoTools_v1.5.9_Setup.exe",
         headers=headers_upload,
         data=f
     )
