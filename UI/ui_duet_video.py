@@ -96,11 +96,11 @@ def _card():
 
 
 class VideoListWidget(QListWidget):
-    """支持从资源管理器拖入视频文件。"""
+    """支持从资源管理器拖入视频文件，以及内部上下拖拽排序。"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
     def add_files(self, paths):
@@ -142,6 +142,10 @@ class VideoListWidget(QListWidget):
         e.accept() if e.mimeData().hasUrls() else e.ignore()
 
     def dropEvent(self, e):
+        if e.source() == self:
+            super().dropEvent(e)
+            self._renumber()
+            return
         if e.mimeData().hasUrls():
             paths = []
             for url in e.mimeData().urls():
@@ -491,12 +495,13 @@ class AlignThread(QThread):
     done = pyqtSignal(list)
     failed = pyqtSignal(str)
 
-    def __init__(self, pairs, mute_person, speed, out_dir, parent=None):
+    def __init__(self, pairs, mute_person, speed, out_dir, skip_align=False, parent=None):
         super().__init__(parent)
         self.pairs = pairs
         self.out_dir = out_dir
         self.mute_person = mute_person
         self.speed = speed
+        self.skip_align = skip_align
         self._stop = False
 
     def stop(self):
@@ -511,22 +516,33 @@ class AlignThread(QThread):
             if self._stop:
                 self.failed.emit("已取消对齐")
                 return
-            self.progress.emit(i, n, f"正在对齐 {i + 1}/{n}：{os.path.basename(pv)}")
+            self.progress.emit(i, n, f"处理中 {i + 1}/{n}：{os.path.basename(pv)}")
             stem = os.path.splitext(os.path.basename(pv))[0]
             out = os.path.join(out_dir, f"{i + 1:03d}_{stem}_aligned.mp4")
             try:
-                r = align_person_video(pv, vv, out, self.mute_person, self.speed)
-                pi = probe_info(r["cache"])
-                vi = probe_info(vv)
+                if self.skip_align:
+                    pi = probe_info(pv)
+                    vi = probe_info(vv)
+                    dur = max(pi.get("duration", 0), vi.get("duration", 0))
+                    r_cache = pv
+                    results.append({
+                        "person": pv, "viral": vv, "task_dir": out_dir, "cache": r_cache, "duration": dur,
+                        "p_w": pi.get("width", 1080), "p_h": pi.get("height", 1920), "p_audio": pi.get("has_audio", False),
+                        "v_w": vi.get("width", 1080), "v_h": vi.get("height", 1920), "v_audio": vi.get("has_audio", False),
+                    })
+                else:
+                    r = align_person_video(pv, vv, out, self.mute_person, self.speed)
+                    pi = probe_info(r["cache"])
+                    vi = probe_info(vv)
+                    results.append({
+                        "person": pv, "viral": vv, "task_dir": out_dir, "cache": r["cache"], "duration": r["duration"],
+                        "p_w": pi["width"], "p_h": pi["height"], "p_audio": pi["has_audio"],
+                        "v_w": vi["width"], "v_h": vi["height"], "v_audio": vi["has_audio"],
+                    })
             except Exception as e:
                 self.failed.emit(str(e))
                 return
-            results.append({
-                "person": pv, "viral": vv, "task_dir": out_dir, "cache": r["cache"], "duration": r["duration"],
-                "p_w": pi["width"], "p_h": pi["height"], "p_audio": pi["has_audio"],
-                "v_w": vi["width"], "v_h": vi["height"], "v_audio": vi["has_audio"],
-            })
-        self.progress.emit(n, n, "对齐完成")
+        self.progress.emit(n, n, "处理完成")
         self.done.emit(results)
 
 
@@ -545,6 +561,7 @@ class FrameThread(QThread):
 
 class RenderThread(QThread):
     progress = pyqtSignal(int, int)
+    task_progress = pyqtSignal(int, float)
     log = pyqtSignal(str)
     finished_all = pyqtSignal(int, int)
 
@@ -554,15 +571,42 @@ class RenderThread(QThread):
 
     def run(self):
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import subprocess
+
+        def run_with_progress(cmd, dur, idx):
+            p = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore", creationflags=0x08000000)
+            err_lines = []
+            for line in p.stderr:
+                err_lines.append(line)
+                if "time=" in line:
+                    try:
+                        t_str = line.split("time=")[1].split(" ")[0]
+                        h, m, s = t_str.split(":")
+                        sec = int(h)*3600 + int(m)*60 + float(s)
+                        if dur > 0:
+                            pct = min(99.0, sec / dur * 100.0)
+                            self.task_progress.emit(idx, pct)
+                    except:
+                        pass
+            p.wait()
+            return p.returncode, "".join(err_lines)
 
         def work(job):
+            idx = job["index"]
+            dur = job["task"]["duration"] / max(0.1, job["kw"].get("speed", 1.0))
+            if job["kw"].get("max_3min") and dur > 180:
+                dur = 180
+                
+            self.task_progress.emit(idx, 1.0)
             cmd = build_render_cmd(job["task"], job["tpl"], job["out"], enc_key=self.enc_key, **job["kw"])
-            rc, err = run_cmd(cmd)
+            rc, err = run_with_progress(cmd, dur, idx)
             fb = False
             if rc != 0 and self.enc_key != "cpu":
                 fb = True
                 cmd = build_render_cmd(job["task"], job["tpl"], job["out"], enc_key="cpu", **job["kw"])
-                rc, err = run_cmd(cmd)
+                rc, err = run_with_progress(cmd, dur, idx)
+            if rc == 0:
+                self.task_progress.emit(idx, 100.0)
             return job, rc, err, fb
 
         n = len(self.jobs)
@@ -1570,11 +1614,24 @@ class DuetVideoUI(QWidget):
         self.lbl_status1 = QLabel("")
         self.lbl_status1.setWordWrap(True)
         row.addWidget(self.lbl_status1, 1)
-        self.btn_align = QPushButton("⏱ 对齐时间线")
+        
+        self.cmb_align_mode = QComboBox()
+        self.cmb_align_mode.addItem("默认: 按照左右列表当前顺序对齐", "default")
+        self.cmb_align_mode.addItem("匹配: 按文件名开头的数字配对", "number")
+        self.cmb_align_mode.addItem("匹配: 按文件名相似度自动配对", "fuzzy")
+        row.addWidget(self.cmb_align_mode)
+        
+        self.btn_align = QPushButton("⏱ 开始对齐")
         self.btn_align.setProperty("class", "ActionBtn")
-        self.btn_align.setMinimumWidth(160)
-        self.btn_align.clicked.connect(self.start_align)
+        self.btn_align.clicked.connect(lambda: self.start_align(False))
         row.addWidget(self.btn_align)
+        
+        self.btn_skip_align = QPushButton("⏭️ 不对齐直接下一步")
+        self.btn_skip_align.setProperty("class", "ActionBtn")
+        self.btn_skip_align.setStyleSheet("background-color: #718096;")
+        self.btn_skip_align.clicked.connect(lambda: self.start_align(True))
+        row.addWidget(self.btn_skip_align)
+        
         al.addLayout(row)
         self.align_progress = QProgressBar()
         self.align_progress.setValue(0)
@@ -1677,7 +1734,7 @@ class DuetVideoUI(QWidget):
             self.lbl_status1.setText(f"已配对 {c1} 组，请点击「⏱ 对齐时间线」生成对齐缓存。{extra}")
             self.lbl_status1.setStyleSheet("color: #DD6B20; font-weight: bold;")
 
-    def start_align(self):
+    def start_align(self, skip=False):
         if self._align_thread and self._align_thread.isRunning():
             self._align_thread.stop()
             return
@@ -1687,14 +1744,43 @@ class DuetVideoUI(QWidget):
                                 f"人物视频与爆款视频数量必须大于 0 且完全一致！\n\n"
                                 f"当前：人物视频 {c1} 个，爆款视频 {c2} 个。")
             return
-        pairs = list(zip(self.list_person.paths(), self.list_viral.paths()))
+            
+        p_paths = self.list_person.paths()
+        v_paths = self.list_viral.paths()
+        mode = self.cmb_align_mode.currentData()
+        
+        if mode == "number":
+            import re
+            def get_num(p):
+                m = re.search(r'^(\d+)', os.path.basename(p))
+                return int(m.group(1)) if m else -1
+            p_paths = sorted(p_paths, key=get_num)
+            v_paths = sorted(v_paths, key=get_num)
+            self.list_person.clear()
+            self.list_person.add_files(p_paths)
+            self.list_viral.clear()
+            self.list_viral.add_files(v_paths)
+        elif mode == "fuzzy":
+            import difflib
+            new_v = []
+            v_pool = list(v_paths)
+            for p in p_paths:
+                p_name = os.path.basename(p)
+                best_v = max(v_pool, key=lambda x: difflib.SequenceMatcher(None, p_name, os.path.basename(x)).ratio())
+                new_v.append(best_v)
+                v_pool.remove(best_v)
+            v_paths = new_v
+            self.list_viral.clear()
+            self.list_viral.add_files(v_paths)
+            
+        pairs = list(zip(p_paths, v_paths))
         task_dir = new_task_cache_dir()
         self._align_thread = AlignThread(pairs, self.chk_mute_person.isChecked(),
-                                         self.spin_speed.value(), task_dir, self)
+                                         self.spin_speed.value(), task_dir, skip_align=skip, parent=self)
         self._align_thread.progress.connect(self._on_align_progress)
         self._align_thread.done.connect(self._on_align_done)
         self._align_thread.failed.connect(self._on_align_failed)
-        self.btn_align.setText("⏹ 取消对齐")
+        self.btn_align.setText("⏹ 取消")
         self._align_thread.start()
 
     def _on_align_progress(self, i, n, msg):
@@ -2436,11 +2522,24 @@ class DuetVideoUI(QWidget):
 
         left = _card()
         lv = QVBoxLayout(left)
-        lv.addWidget(_card_title("📝 导出文件名"))
-        self.tbl_names = QTableWidget(0, 2)
-        self.tbl_names.setHorizontalHeaderLabels(["爆款视频", "输出文件名（可直接编辑）"])
-        self.tbl_names.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        lv.addWidget(_card_title("📝 导出任务与文件名"))
+        btn_row = QHBoxLayout()
+        btn_sel_all = QPushButton("☑ 全选")
+        btn_sel_none = QPushButton("☐ 取消全选")
+        btn_sel_all.clicked.connect(lambda: self._select_all_tasks(True))
+        btn_sel_none.clicked.connect(lambda: self._select_all_tasks(False))
+        btn_row.addWidget(btn_sel_all)
+        btn_row.addWidget(btn_sel_none)
+        btn_row.addStretch()
+        lv.addLayout(btn_row)
+        
+        self.tbl_names = QTableWidget(0, 3)
+        self.tbl_names.setHorizontalHeaderLabels(["导出", "输出文件名（可直接编辑）", "进度"])
+        self.tbl_names.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.tbl_names.setColumnWidth(0, 70)
         self.tbl_names.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tbl_names.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.tbl_names.setColumnWidth(2, 110)
         self.tbl_names.itemChanged.connect(self._on_name_edited)
         lv.addWidget(self.tbl_names, 1)
         b = QPushButton("📋 批量粘贴文件名")
