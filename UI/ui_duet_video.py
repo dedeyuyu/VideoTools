@@ -22,13 +22,15 @@ from PyQt6.QtWidgets import (QApplication,
     QInputDialog, QColorDialog, QFontComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSizePolicy, QAbstractItemView, QStyledItemDelegate, QStyle,
 )
-from PyQt6.QtCore import Qt, QThread, QPoint, pyqtSignal, QTimer, QRectF, QSize, QUrl
+from PyQt6.QtCore import Qt, QThread, QPoint, QPointF, pyqtSignal, QTimer, QRectF, QSize, QUrl
 from PyQt6.QtGui import QImage, QIcon, QPixmap, QPainterPath, QPainter, QColor, QPen, QFont, QDesktopServices, QFontDatabase, QPalette
 
 from image_worker.duet_worker import (
     get_data_dir, get_cache_dir, probe_info, align_person_video, extract_frame_png,
     set_cache_root, new_task_cache_dir, list_task_cache_dirs, get_card_lib_dir,
     default_template, box_layout, build_render_cmd, run_cmd, CANVAS_W, CANVAS_H,
+    SOURCES, SRC_LABELS, FILL_MODES, LAYOUT_PRESETS, template_from_cells, tpl_cells,
+    sources_used, cell_rect_px, task_source,
 )
 from image_worker.duet_render import (
  render_watermark_layer,    default_card, template_icon, compose_preview, render_card_layer, load_font_file,
@@ -60,13 +62,84 @@ def _load_json(name, default):
         return default
 
 
+PROJECT_FILE = "project.json"   # 每个对齐文件夹里的工程文件
+PROJECT_BACKUP_KEEP = 30        # 每个工程最多保留的历史快照数
+PROJECT_BACKUP_GAP = 120        # 两次快照之间至少间隔（秒）
+
+
+def _atomic_write(path, text):
+    """先写临时文件再替换，避免崩溃/断电时把文件写坏。"""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def _save_json(name, data):
+    """全局文件（预设 / 模板 / 软件偏好），固定存放在 duet_data。"""
     path = os.path.join(get_data_dir(), name)
     try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2))
     except Exception as e:
         print("save json failed:", e)
+
+
+def project_backup_dir(proj_dir):
+    d = os.path.join(proj_dir, "backups")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def save_project(proj_dir, data):
+    """把一次任务的全部参数写到它自己的对齐文件夹：<对齐文件夹>/project.json，并保留历史快照。"""
+    import time, glob
+    if not proj_dir or not os.path.isdir(proj_dir):
+        return False
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    path = os.path.join(proj_dir, PROJECT_FILE)
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                if f.read() == text:
+                    return True          # 没有变化，不重复写
+    except Exception:
+        pass
+    _atomic_write(path, text)
+    try:
+        bdir = project_backup_dir(proj_dir)
+        olds = sorted(glob.glob(os.path.join(bdir, "project_*.json")))
+        if not olds or time.time() - os.path.getmtime(olds[-1]) >= PROJECT_BACKUP_GAP:
+            with open(os.path.join(bdir, f"project_{time.strftime('%Y%m%d_%H%M%S')}.json"),
+                      "w", encoding="utf-8") as f:
+                f.write(text)
+            olds = sorted(glob.glob(os.path.join(bdir, "project_*.json")))
+            for old in olds[:-PROJECT_BACKUP_KEEP]:
+                try:
+                    os.remove(old)
+                except Exception:
+                    pass
+    except Exception as e:
+        print("project snapshot failed:", e)
+    return True
+
+
+def load_project(proj_dir):
+    """读取对齐文件夹里的工程；若文件夹被移动过，自动把缓存视频路径修正到新位置。"""
+    path = os.path.join(proj_dir, PROJECT_FILE)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for t in data.get("tasks") or []:
+        old_dir = t.get("task_dir", "")
+        t["task_dir"] = proj_dir
+        cache = t.get("cache", "")
+        if cache and not os.path.isfile(cache) and old_dir and \
+                os.path.normcase(os.path.dirname(cache)) == os.path.normcase(old_dir):
+            moved = os.path.join(proj_dir, os.path.basename(cache))
+            if os.path.isfile(moved):
+                t["cache"] = moved
+    return data
 
 
 def _parse_pasted(text: str) -> list:
@@ -160,15 +233,20 @@ class VideoListWidget(QListWidget):
 
 
 class CanvasView(QWidget):
-    """按 9:16 比例显示合成画面；可选：拖动分割线。"""
+    """按 9:16 比例显示合成画面；可编辑模式下：拖动格子分界线、拖动/缩放画中画小窗、点击选中格子。"""
     splitDragged = pyqtSignal(float)
+    cellsChanged = pyqtSignal(list)
+    cellSelected = pyqtSignal(int)
+
+    MIN_FRAC = 0.05
 
     def __init__(self, draggable=False, parent=None):
         super().__init__(parent)
         self._img = None
         self._split = 0.5
-        self._drag = False
         self._draggable = draggable
+        self._cells = None
+        self._drag = None
         self.setMinimumSize(240, 427)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
@@ -179,11 +257,20 @@ class CanvasView(QWidget):
             self._split = split_ratio
         self.update()
 
+    def set_cells(self, cells):
+        import copy
+        self._cells = copy.deepcopy(cells) if cells is not None else None
+        self.update()
+
     def _rect(self):
         w, h = self.width(), self.height()
         s = min(w / CANVAS_W, h / CANVAS_H)
         tw, th = CANVAS_W * s, CANVAS_H * s
         return QRectF((w - tw) / 2, (h - th) / 2, tw, th)
+
+    def _to_frac(self, pos):
+        r = self._rect()
+        return (pos.x() - r.left()) / max(1, r.width()), (pos.y() - r.top()) / max(1, r.height())
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -195,36 +282,155 @@ class CanvasView(QWidget):
             p.fillRect(r, QColor("#2D3748"))
         p.setPen(QPen(QColor("#718096"), 1))
         p.drawRect(r)
-        if self._draggable:
+        if self._draggable and self._cells:
+            pen = QPen(QColor("#F6E05E"), 2)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for cl in self._cells:
+                x = r.left() + cl["x"] * r.width()
+                y = r.top() + cl["y"] * r.height()
+                w, h = cl["w"] * r.width(), cl["h"] * r.height()
+                if cl.get("pip"):
+                    p.setPen(QPen(QColor("#F6E05E"), 2, Qt.PenStyle.DashLine))
+                    p.drawRect(QRectF(x, y, w, h))
+                    p.setBrush(QColor("#F6E05E"))
+                    p.drawRect(QRectF(x + w - 8, y + h - 8, 8, 8))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(pen)
+                else:
+                    if cl["x"] + cl["w"] < 0.999:
+                        p.drawLine(QPointF(x + w, y), QPointF(x + w, y + h))
+                    if cl["y"] + cl["h"] < 0.999:
+                        p.drawLine(QPointF(x, y + h), QPointF(x + w, y + h))
+        elif self._draggable:
             y = r.top() + r.height() * self._split
             p.setPen(QPen(QColor("#F6E05E"), 2))
             p.drawLine(int(r.left()), int(y), int(r.right()), int(y))
-            p.setBrush(QColor("#F6E05E"))
-            p.drawRoundedRect(QRectF(r.center().x() - 22, y - 6, 44, 12), 6, 6)
         p.end()
 
-    def _near_split(self, y):
+    # —— 命中检测 ——
+    def _hit(self, pos):
+        if not self._cells:
+            return None
         r = self._rect()
-        return abs(y - (r.top() + r.height() * self._split)) < 10
+        fx, fy = self._to_frac(pos)
+        tolx, toly = 8 / max(1, r.width()), 8 / max(1, r.height())
+        # 1) 画中画小窗（最上层优先）
+        for i in reversed(range(len(self._cells))):
+            cl = self._cells[i]
+            if not cl.get("pip"):
+                continue
+            x2, y2 = cl["x"] + cl["w"], cl["y"] + cl["h"]
+            if abs(fx - x2) < tolx * 1.6 and abs(fy - y2) < toly * 1.6:
+                return ("resize", i)
+            if cl["x"] <= fx <= x2 and cl["y"] <= fy <= y2:
+                return ("move", i)
+        # 2) 普通格子的内部分界线
+        best = None
+        for cl in self._cells:
+            if cl.get("pip"):
+                continue
+            for axis, v, lo, hi, d in (
+                    ("x", cl["x"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"])),
+                    ("x", cl["x"] + cl["w"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"] - cl["w"])),
+                    ("y", cl["y"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"])),
+                    ("y", cl["y"] + cl["h"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"] - cl["h"]))):
+                if v <= 0.001 or v >= 0.999:
+                    continue
+                along = fy if axis == "x" else fx
+                tol = tolx if axis == "x" else toly
+                if d < tol and lo <= along <= hi and (best is None or d < best[3]):
+                    best = ("edge", axis, v, d)
+        if best:
+            return best[:3]
+        # 3) 普通格子内部 → 选中
+        for i, cl in enumerate(self._cells):
+            if not cl.get("pip") and cl["x"] <= fx <= cl["x"] + cl["w"] and cl["y"] <= fy <= cl["y"] + cl["h"]:
+                return ("select", i)
+        return None
 
     def mousePressEvent(self, e):
-        if self._draggable and self._near_split(e.position().y()):
-            self._drag = True
+        if not self._draggable:
+            return
+        if self._cells is None:
+            r = self._rect()
+            if abs(e.position().y() - (r.top() + r.height() * self._split)) < 10:
+                self._drag = ("split",)
+            return
+        hit = self._hit(e.position())
+        if not hit:
+            return
+        fx, fy = self._to_frac(e.position())
+        if hit[0] in ("move", "resize", "select"):
+            self.cellSelected.emit(hit[1])
+        if hit[0] == "move":
+            cl = self._cells[hit[1]]
+            self._drag = ("move", hit[1], fx - cl["x"], fy - cl["y"])
+        elif hit[0] == "resize":
+            cl = self._cells[hit[1]]
+            self._drag = ("resize", hit[1], cl["h"] / max(1e-6, cl["w"]))
+        elif hit[0] == "edge":
+            self._drag = ("edge", hit[1], hit[2])
 
     def mouseMoveEvent(self, e):
-        y = e.position().y()
-        if self._drag:
-            r = self._rect()
-            ratio = max(0.05, min(0.95, (y - r.top()) / max(1, r.height())))
+        fx, fy = self._to_frac(e.position())
+        d = self._drag
+        if d is None:
+            if self._draggable:
+                hit = self._hit(e.position()) if self._cells is not None else None
+                cur = Qt.CursorShape.ArrowCursor
+                if self._cells is None:
+                    r = self._rect()
+                    if abs(e.position().y() - (r.top() + r.height() * self._split)) < 10:
+                        cur = Qt.CursorShape.SizeVerCursor
+                elif hit and hit[0] == "edge":
+                    cur = Qt.CursorShape.SizeHorCursor if hit[1] == "x" else Qt.CursorShape.SizeVerCursor
+                elif hit and hit[0] == "move":
+                    cur = Qt.CursorShape.SizeAllCursor
+                elif hit and hit[0] == "resize":
+                    cur = Qt.CursorShape.SizeFDiagCursor
+                self.setCursor(cur)
+            return
+        if d[0] == "split":
+            ratio = max(0.05, min(0.95, fy))
             self._split = ratio
             self.splitDragged.emit(ratio)
             self.update()
-        elif self._draggable:
-            self.setCursor(Qt.CursorShape.SizeVerCursor if self._near_split(y)
-                           else Qt.CursorShape.ArrowCursor)
+            return
+        m = self.MIN_FRAC
+        if d[0] == "move":
+            cl = self._cells[d[1]]
+            cl["x"] = max(0.0, min(1 - cl["w"], fx - d[2]))
+            cl["y"] = max(0.0, min(1 - cl["h"], fy - d[3]))
+        elif d[0] == "resize":
+            cl = self._cells[d[1]]
+            w = max(m, min(1 - cl["x"], fx - cl["x"]))
+            h = w * d[2]
+            if cl["y"] + h > 1:
+                h = 1 - cl["y"]
+                w = h / d[2]
+            cl["w"], cl["h"] = w, h
+        elif d[0] == "edge":
+            axis, v0 = d[1], d[2]
+            pos, size = ("x", "w") if axis == "x" else ("y", "h")
+            v = fx if axis == "x" else fy
+            eps = 0.002
+            before = [cl for cl in self._cells if not cl.get("pip") and abs(cl[pos] + cl[size] - v0) < eps]
+            after = [cl for cl in self._cells if not cl.get("pip") and abs(cl[pos] - v0) < eps]
+            lo = max([cl[pos] + m for cl in before] + [m])
+            hi = min([cl[pos] + cl[size] - m for cl in after] + [1 - m])
+            v = max(lo, min(hi, v))
+            for cl in before:
+                cl[size] = v - cl[pos]
+            for cl in after:
+                cl[size] = cl[pos] + cl[size] - v
+                cl[pos] = v
+            self._drag = ("edge", axis, v)
+        self.cellsChanged.emit([dict(cl) for cl in self._cells])
+        self.update()
 
     def mouseReleaseEvent(self, e):
-        self._drag = False
+        self._drag = None
 
 
 class ScreenPicker(QWidget):
@@ -495,9 +701,10 @@ class AlignThread(QThread):
     done = pyqtSignal(list)
     failed = pyqtSignal(str)
 
-    def __init__(self, pairs, mute_person, speed, out_dir, skip_align=False, parent=None):
+    def __init__(self, items, mute_person, speed, out_dir, skip_align=False, parent=None):
+        """items: [(主视频, [人物视频1, 人物视频2, ...]), ...]"""
         super().__init__(parent)
-        self.pairs = pairs
+        self.items = items
         self.out_dir = out_dir
         self.mute_person = mute_person
         self.speed = speed
@@ -510,53 +717,105 @@ class AlignThread(QThread):
     def run(self):
         out_dir = self.out_dir
         os.makedirs(out_dir, exist_ok=True)
-        n = len(self.pairs)
+        n = len(self.items)
         results = []
-        for i, (pv, vv) in enumerate(self.pairs):
+        for i, (vv, pvs) in enumerate(self.items):
             if self._stop:
                 self.failed.emit("已取消对齐")
                 return
-            self.progress.emit(i, n, f"处理中 {i + 1}/{n}：{os.path.basename(pv)}")
-            stem = os.path.splitext(os.path.basename(pv))[0]
-            out = os.path.join(out_dir, f"{i + 1:03d}_{stem}_aligned.mp4")
+            self.progress.emit(i, n, f"处理中 {i + 1}/{n}：{os.path.basename(vv)}")
             try:
-                if self.skip_align:
-                    pi = probe_info(pv)
-                    vi = probe_info(vv)
-                    dur = max(pi.get("duration", 0), vi.get("duration", 0))
-                    r_cache = pv
-                    results.append({
-                        "person": pv, "viral": vv, "task_dir": out_dir, "cache": r_cache, "duration": dur,
-                        "p_w": pi.get("width", 1080), "p_h": pi.get("height", 1920), "p_audio": pi.get("has_audio", False),
-                        "v_w": vi.get("width", 1080), "v_h": vi.get("height", 1920), "v_audio": vi.get("has_audio", False),
-                    })
-                else:
-                    r = align_person_video(pv, vv, out, self.mute_person, self.speed)
-                    pi = probe_info(r["cache"])
-                    vi = probe_info(vv)
-                    results.append({
-                        "person": pv, "viral": vv, "task_dir": out_dir, "cache": r["cache"], "duration": r["duration"],
-                        "p_w": pi["width"], "p_h": pi["height"], "p_audio": pi["has_audio"],
-                        "v_w": vi["width"], "v_h": vi["height"], "v_audio": vi["has_audio"],
-                    })
+                vi = probe_info(vv)
+                persons = []
+                dur = vi.get("duration", 0)
+                for k, pv in enumerate(pvs):
+                    if self.skip_align:
+                        pi = probe_info(pv)
+                        cache = pv
+                        dur = max(dur, pi.get("duration", 0))
+                    else:
+                        stem = os.path.splitext(os.path.basename(pv))[0]
+                        tag = "" if k == 0 else f"p{k + 1}_"
+                        out = os.path.join(out_dir, f"{i + 1:03d}_{tag}{stem}_aligned.mp4")
+                        r = align_person_video(pv, vv, out, self.mute_person, self.speed)
+                        cache = r["cache"]
+                        dur = r["duration"]
+                        pi = probe_info(cache)
+                    persons.append({"person": pv, "cache": cache, "w": pi.get("width", 1080),
+                                    "h": pi.get("height", 1920), "audio": pi.get("has_audio", False)})
             except Exception as e:
                 self.failed.emit(str(e))
                 return
+            p0 = persons[0]
+            results.append({
+                "person": p0["person"], "viral": vv, "task_dir": out_dir, "cache": p0["cache"], "duration": dur,
+                "p_w": p0["w"], "p_h": p0["h"], "p_audio": p0["audio"],
+                "v_w": vi.get("width", 1080), "v_h": vi.get("height", 1920), "v_audio": vi.get("has_audio", False),
+                "extra": persons[1:],
+            })
         self.progress.emit(n, n, "处理完成")
         self.done.emit(results)
 
 
 class FrameThread(QThread):
-    done = pyqtSignal(str, object, object, float, int)   # tag, p_bytes, v_bytes, t, req
+    done = pyqtSignal(str, object, float, int)   # tag, {来源: png 字节}, t, req
 
-    def __init__(self, tag, ppath, vpath, t, req, parent=None):
+    def __init__(self, tag, paths, t, req, parent=None):
         super().__init__(parent)
-        self.tag, self.ppath, self.vpath, self.t, self.req = tag, ppath, vpath, t, req
+        self.tag, self.paths, self.t, self.req = tag, dict(paths), t, req
 
     def run(self):
-        pb = extract_frame_png(self.ppath, self.t) if self.ppath else b""
-        vb = extract_frame_png(self.vpath, self.t) if self.vpath else b""
-        self.done.emit(self.tag, pb, vb, self.t, self.req)
+        out = {k: (extract_frame_png(pth, self.t) if pth else b"") for k, pth in self.paths.items()}
+        self.done.emit(self.tag, out, self.t, self.req)
+
+
+class LayoutPickerDialog(QDialog):
+    """新建模板时选择版式：常用 / 多格 / 画中画。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("选择画面版式")
+        self.resize(520, 460)
+        self.result_cells = None
+        self.result_name = ""
+        v = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        self._lists = []
+        groups = {}
+        for tab, name, cells in LAYOUT_PRESETS:
+            groups.setdefault(tab, []).append((name, cells))
+        for tab, items in groups.items():
+            lw = QListWidget()
+            lw.setViewMode(QListWidget.ViewMode.IconMode)
+            lw.setIconSize(QSize(54, 96))
+            lw.setGridSize(QSize(150, 140))
+            lw.setResizeMode(QListWidget.ResizeMode.Adjust)
+            lw.setMovement(QListWidget.Movement.Static)
+            for name, cells in items:
+                it = QListWidgetItem(template_icon(template_from_cells(name, cells)), name)
+                it.setData(Qt.ItemDataRole.UserRole, (name, cells))
+                lw.addItem(it)
+            lw.itemDoubleClicked.connect(lambda *_: self._accept())
+            self.tabs.addTab(lw, tab)
+            self._lists.append(lw)
+        v.addWidget(self.tabs, 1)
+        tip = QLabel("格子里的数字：1 = 主视频，2/3/4/5 = 人物视频1/2/3/4。创建后可在右侧修改每个格子放哪个视频。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#718096;")
+        v.addWidget(tip)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+    def _accept(self):
+        lw = self._lists[self.tabs.currentIndex()]
+        it = lw.currentItem()
+        if it is None:
+            QMessageBox.information(self, "提示", "请先选择一个版式。")
+            return
+        self.result_name, self.result_cells = it.data(Qt.ItemDataRole.UserRole)
+        self.accept()
 
 
 class RenderThread(QThread):
@@ -592,11 +851,18 @@ class RenderThread(QThread):
             return p.returncode, "".join(err_lines)
 
         def work(job):
-            idx = job["index"]
-            dur = job["task"]["duration"] / max(0.1, job["kw"].get("speed", 1.0))
+            try:
+                return _work(job)
+            except Exception as e:
+                import traceback
+                return job, -1, traceback.format_exc(), False
+
+        def _work(job):
+            idx = job.get("index", 0)
+            dur = job["task"]["duration"] / max(0.1, job["kw"].get("global_speed", 1.0))
             if job["kw"].get("max_3min") and dur > 180:
                 dur = 180
-                
+
             self.task_progress.emit(idx, 1.0)
             cmd = build_render_cmd(job["task"], job["tpl"], job["out"], enc_key=self.enc_key, **job["kw"])
             rc, err = run_with_progress(cmd, dur, idx)
@@ -1483,7 +1749,7 @@ class DuetVideoUI(QWidget):
         self._threads = []
         self._frame_cache = {}
         self._frame_req = 0
-        self._tpl_frames = (None, None)
+        self._tpl_frames = {}
         self._align_thread = None
         self._render_thread = None
         self.cur_task = 0
@@ -1499,6 +1765,15 @@ class DuetVideoUI(QWidget):
             self.templates = [default_template()]
             _save_json("templates.json", self.templates)
         self.settings = _load_json("settings.json", {})
+        if not self.settings.get("layout_presets_v1"):
+            # 第一次升级：把多格 / 画中画版式加入模板库
+            names = {t["name"] for t in self.templates}
+            for tab, name, cells in LAYOUT_PRESETS:
+                nm = f"{tab}·{name}"
+                if nm not in names:
+                    self.templates.append(template_from_cells(nm, cells))
+            _save_json("templates.json", self.templates)
+            self.settings["layout_presets_v1"] = True
         set_cache_root(self.settings.get("cache_root", ""))
         self.task_dir = ""
         self.active_tpl_name = self.settings.get("active_tpl", self.templates[0]["name"])
@@ -1570,6 +1845,12 @@ class DuetVideoUI(QWidget):
         bottom.addWidget(self.btn_next)
         root.addLayout(bottom)
 
+        # 每 30 秒自动保存一次全部设置（防崩溃丢失）
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(30_000)
+        self._autosave_timer.timeout.connect(self._autosave)
+        self._autosave_timer.start()
+
         self._preview_timer = QTimer(self)
         self._preview_timer.setSingleShot(True)
         self._preview_timer.setInterval(220)
@@ -1601,10 +1882,18 @@ class DuetVideoUI(QWidget):
         lay.addLayout(tpl_row)
 
         lists = QHBoxLayout()
-        self.list_person, p_card = self._video_list_card("👤 人物视频（较短，将被循环）", "person")
-        self.list_viral, v_card = self._video_list_card("🔥 爆款视频（时长基准）", "viral")
+        self.list_person, p_card = self._video_list_card("👤 人物视频1（较短，将被循环）", "person")
+        self.list_viral, v_card = self._video_list_card("🎬 主视频（时长基准）", "viral")
+        lists.addWidget(v_card)     # 主视频是时长基准，放在最前面
         lists.addWidget(p_card)
-        lists.addWidget(v_card)
+        # 多格 / 画中画模板需要的额外人物视频列（按当前模板自动显示）
+        self.extra_lists, self.extra_cards = {}, {}
+        for src in ("person2", "person3", "person4"):
+            lw, card = self._video_list_card(f"👥 {SRC_LABELS[src]}", src)
+            card.setVisible(False)
+            lists.addWidget(card)
+            self.extra_lists[src] = lw
+            self.extra_cards[src] = card
         lay.addLayout(lists, 1)
 
         # 对齐区
@@ -1631,6 +1920,13 @@ class DuetVideoUI(QWidget):
         self.btn_skip_align.setStyleSheet("background-color: #718096;")
         self.btn_skip_align.clicked.connect(lambda: self.start_align(True))
         row.addWidget(self.btn_skip_align)
+
+        self.btn_open_proj = QPushButton("📂 打开已对齐工程")
+        self.btn_open_proj.setProperty("class", "ActionBtn")
+        self.btn_open_proj.setStyleSheet("background-color: #38A169;")
+        self.btn_open_proj.setToolTip("选择以前对齐过的文件夹，直接恢复那次任务的全部参数（文字、卡片样式、导出设置……）")
+        self.btn_open_proj.clicked.connect(self._open_project)
+        row.addWidget(self.btn_open_proj)
         
         al.addLayout(row)
         self.align_progress = QProgressBar()
@@ -1652,7 +1948,7 @@ class DuetVideoUI(QWidget):
         al.addLayout(cr)
         lay.addWidget(align_card)
 
-        for lw in (self.list_person, self.list_viral):
+        for lw in (self.list_person, self.list_viral, *self.extra_lists.values()):
             lw.model().rowsInserted.connect(self._mark_dirty)
             lw.model().rowsRemoved.connect(self._mark_dirty)
         return page
@@ -1667,6 +1963,8 @@ class DuetVideoUI(QWidget):
 
         opt = QHBoxLayout()
         chk = QCheckBox("取消原视频声音（静音）")
+        if kind not in ("person", "viral"):
+            chk.setVisible(False)
         if kind == "person":
             chk.setChecked(True)
             self.chk_mute_person = chk
@@ -1674,12 +1972,16 @@ class DuetVideoUI(QWidget):
             opt.addWidget(chk)
             opt.addStretch()
             opt.addWidget(QLabel("播放倍速:"))
-            self.spin_speed = QDoubleSpinBox()
-            self.spin_speed.setRange(0.25, 4.0)
-            self.spin_speed.setSingleStep(0.05)
-            self.spin_speed.setValue(1.0)
-            self.spin_speed.valueChanged.connect(self._mark_dirty)
-            opt.addWidget(self.spin_speed)
+            self.spin_person_speed = QDoubleSpinBox()
+            self.spin_person_speed.setRange(0.25, 4.0)
+            self.spin_person_speed.setSingleStep(0.05)
+            self.spin_person_speed.setValue(1.0)
+            self.spin_person_speed.setToolTip("所有人物视频对齐时的播放倍速")
+            self.spin_person_speed.valueChanged.connect(self._mark_dirty)
+            opt.addWidget(self.spin_person_speed)
+        elif kind != "viral":
+            opt.addWidget(QLabel("静音/倍速 与「人物视频1」相同"))
+            opt.addStretch()
         else:
             chk.setChecked(False)
             self.chk_mute_viral = chk
@@ -1688,17 +1990,26 @@ class DuetVideoUI(QWidget):
         v.addLayout(opt)
 
         btns = QHBoxLayout()
-        b_imp = QPushButton("➕ 导入视频")
+        icon_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "theme_icons")
+        def _ib(icon, tip, text=""):
+            b = QPushButton(text)
+            b.setIcon(QIcon(os.path.join(icon_dir, icon)))
+            b.setIconSize(QSize(16, 16))
+            b.setToolTip(tip)
+            if not text:
+                b.setFixedWidth(36)
+            else:
+                b.setMinimumWidth(72)
+            return b
+        b_imp = _ib("add_video.svg", "导入视频（也可以直接拖拽文件/文件夹到列表）", "导入")
         b_imp.clicked.connect(lambda: self._import_videos(lw))
-        b_up = QPushButton("↑")
-        b_up.setFixedWidth(34)
+        b_up = _ib("arrow_up.svg", "上移选中的视频")
         b_up.clicked.connect(lambda: lw.move_selected(-1))
-        b_dn = QPushButton("↓")
-        b_dn.setFixedWidth(34)
+        b_dn = _ib("arrow_down.svg", "下移选中的视频")
         b_dn.clicked.connect(lambda: lw.move_selected(1))
-        b_rm = QPushButton("移除")
+        b_rm = _ib("remove.svg", "移除选中的视频")
         b_rm.clicked.connect(lw.remove_selected)
-        b_clr = QPushButton("🗑 清空")
+        b_clr = _ib("clear.svg", "清空整个列表")
         b_clr.clicked.connect(lw.clear)
         for b in (b_imp, b_up, b_dn, b_rm, b_clr):
             btns.addWidget(b)
@@ -1714,69 +2025,96 @@ class DuetVideoUI(QWidget):
     def _mark_dirty(self, *a):
         if self.aligned:
             self.aligned = False
-        self._tpl_frames = (None, None)
+        self._tpl_frames = {}
+        self.update_align_status()
+
+    def _src_list(self, src):
+        if src == "viral":
+            return self.list_viral
+        if src == "person":
+            return self.list_person
+        return getattr(self, "extra_lists", {}).get(src)
+
+    def _needed_person_srcs(self):
+        """当前模板需要的人物视频列（至少需要人物视频1）。"""
+        used = sources_used(self.active_tpl())
+        srcs = [s for s in ("person", "person2", "person3", "person4") if s in used]
+        return srcs or ["person"]
+
+    def _sync_source_lists(self):
+        need = set(self._needed_person_srcs())
+        for src, card in getattr(self, "extra_cards", {}).items():
+            card.setVisible(src in need or self.extra_lists[src].count() > 0)
         self.update_align_status()
 
     def update_align_status(self):
-        c1, c2 = self.list_person.count(), self.list_viral.count()
+        cv = self.list_viral.count()
+        counts = {s: self._src_list(s).count() for s in self._needed_person_srcs()}
         if self.aligned:
             self.lbl_status1.setText(f"✅ 时间线已对齐，共 {len(self.tasks)} 组任务（缓存：{os.path.basename(self.task_dir)}）。"
                                      f"可点击「下一步」进入字幕卡片微调。")
             self.lbl_status1.setStyleSheet("color: #38A169; font-weight: bold;")
-        elif c1 == 0 and c2 == 0:
-            self.lbl_status1.setText("请导入「人物视频」与「爆款视频」（可拖拽文件或文件夹），然后点击「对齐时间线」。")
+        elif cv == 0 and not any(counts.values()):
+            names = "、".join(SRC_LABELS[s] for s in counts)
+            self.lbl_status1.setText(f"请导入「主视频」与「{names}」（可拖拽文件或文件夹），然后点击「开始对齐」。")
             self.lbl_status1.setStyleSheet("color: #718096;")
-        elif c1 != c2:
-            self.lbl_status1.setText(f"⚠️ 数量不匹配：人物视频 {c1} 个，爆款视频 {c2} 个，必须一一对应！")
+        elif any(n != cv for n in counts.values()):
+            detail = "，".join(f"{SRC_LABELS[s]} {n} 个" for s, n in counts.items())
+            self.lbl_status1.setText(f"⚠️ 数量不匹配：主视频 {cv} 个，{detail}，必须一一对应！")
             self.lbl_status1.setStyleSheet("color: #E53E3E; font-weight: bold;")
         else:
             extra = "（素材或设置已变更，需要重新对齐）" if self.tasks else ""
-            self.lbl_status1.setText(f"已配对 {c1} 组，请点击「⏱ 对齐时间线」生成对齐缓存。{extra}")
+            self.lbl_status1.setText(f"已配对 {cv} 组，请点击「⏱ 开始对齐」生成对齐缓存。{extra}")
             self.lbl_status1.setStyleSheet("color: #DD6B20; font-weight: bold;")
 
     def start_align(self, skip=False):
         if self._align_thread and self._align_thread.isRunning():
             self._align_thread.stop()
             return
-        c1, c2 = self.list_person.count(), self.list_viral.count()
-        if c1 == 0 or c1 != c2:
+        srcs = self._needed_person_srcs()
+        cv = self.list_viral.count()
+        counts = {s: self._src_list(s).count() for s in srcs}
+        if cv == 0 or any(n != cv for n in counts.values()):
+            detail = "\n".join(f"{SRC_LABELS[s]}：{n} 个" for s, n in counts.items())
             QMessageBox.warning(self, "数量不匹配",
-                                f"人物视频与爆款视频数量必须大于 0 且完全一致！\n\n"
-                                f"当前：人物视频 {c1} 个，爆款视频 {c2} 个。")
+                                f"当前模板「{self.active_tpl_name}」需要以下几列视频，数量必须大于 0 且与主视频完全一致！\n\n"
+                                f"主视频：{cv} 个\n{detail}")
             return
-            
-        p_paths = self.list_person.paths()
+
         v_paths = self.list_viral.paths()
+        p_lists = {s: self._src_list(s).paths() for s in srcs}
         mode = self.cmb_align_mode.currentData()
-        
+
         if mode == "number":
             import re
-            def get_num(p):
-                m = re.search(r'^(\d+)', os.path.basename(p))
+            def get_num(pth):
+                m = re.search(r'^(\d+)', os.path.basename(pth))
                 return int(m.group(1)) if m else -1
-            p_paths = sorted(p_paths, key=get_num)
             v_paths = sorted(v_paths, key=get_num)
-            self.list_person.clear()
-            self.list_person.add_files(p_paths)
-            self.list_viral.clear()
-            self.list_viral.add_files(v_paths)
+            for s in srcs:
+                p_lists[s] = sorted(p_lists[s], key=get_num)
         elif mode == "fuzzy":
             import difflib
-            new_v = []
-            v_pool = list(v_paths)
-            for p in p_paths:
-                p_name = os.path.basename(p)
-                best_v = max(v_pool, key=lambda x: difflib.SequenceMatcher(None, p_name, os.path.basename(x)).ratio())
-                new_v.append(best_v)
-                v_pool.remove(best_v)
-            v_paths = new_v
+            for s in srcs:
+                pool = list(p_lists[s])
+                new = []
+                for vp in v_paths:
+                    vn = os.path.basename(vp)
+                    best = max(pool, key=lambda x: difflib.SequenceMatcher(None, vn, os.path.basename(x)).ratio())
+                    new.append(best)
+                    pool.remove(best)
+                p_lists[s] = new
+        if mode in ("number", "fuzzy"):
             self.list_viral.clear()
             self.list_viral.add_files(v_paths)
-            
-        pairs = list(zip(p_paths, v_paths))
+            for s in srcs:
+                self._src_list(s).clear()
+                self._src_list(s).add_files(p_lists[s])
+
+        items = [(v_paths[i], [p_lists[s][i] for s in srcs]) for i in range(cv)]
         task_dir = new_task_cache_dir()
-        self._align_thread = AlignThread(pairs, self.chk_mute_person.isChecked(),
-                                         self.spin_speed.value(), task_dir, skip_align=skip, parent=self)
+        self._align_thread = AlignThread(items, self.chk_mute_person.isChecked(),
+                                         self.spin_person_speed.value(), task_dir, skip_align=skip, parent=self)
         self._align_thread.progress.connect(self._on_align_progress)
         self._align_thread.done.connect(self._on_align_done)
         self._align_thread.failed.connect(self._on_align_failed)
@@ -1820,6 +2158,7 @@ class DuetVideoUI(QWidget):
         self.align_progress.setFormat("✅ 对齐完成 (%p%)")
         self.update_align_status()
         self.refresh_task_list()
+        self.save_settings()   # 新工程立即写入它自己的对齐文件夹
 
     def _on_align_failed(self, msg):
         self.btn_align.setText("⏱ 对齐时间线")
@@ -1865,13 +2204,14 @@ class DuetVideoUI(QWidget):
         # 中：画布预览
         mid = _card()
         mv = QVBoxLayout(mid)
-        t = _card_title("👁 模板预览（拖动黄色分割线调整上下比例）")
+        t = _card_title("👁 模板预览（拖动黄线调整格子边界；画中画小窗可拖动，拖右下角缩放）")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mv.addWidget(t)
         self.tpl_canvas = CanvasView(draggable=True)
-        self.tpl_canvas.splitDragged.connect(self._on_split_dragged)
+        self.tpl_canvas.cellsChanged.connect(self._on_cells_dragged)
+        self.tpl_canvas.cellSelected.connect(self._on_canvas_cell_selected)
         mv.addWidget(self.tpl_canvas, 1)
-        self.lbl_tpl_hint = QLabel("浅蓝 = 人物视频，浅粉 = 爆款视频。导入素材后会显示第一组视频的真实画面。")
+        self.lbl_tpl_hint = QLabel("浅粉 = 主视频，浅蓝/浅绿/浅橙/浅紫 = 人物视频1/2/3/4。导入素材后会显示第一组视频的真实画面。")
         self.lbl_tpl_hint.setWordWrap(True)
         self.lbl_tpl_hint.setStyleSheet("color:#718096;")
         mv.addWidget(self.lbl_tpl_hint)
@@ -1886,42 +2226,39 @@ class DuetVideoUI(QWidget):
         self.lbl_tpl_name.setStyleSheet("color:#3182CE; font-weight:bold;")
         rv.addWidget(self.lbl_tpl_name)
         form = QFormLayout()
-        self.cmb_order = QComboBox()
-        self.cmb_order.addItem("人物在上，爆款在下", "person_top")
-        self.cmb_order.addItem("爆款在上，人物在下", "viral_top")
-        self.cmb_order.currentIndexChanged.connect(self._on_tpl_param)
-        form.addRow("上下画框内容:", self.cmb_order)
-        b_swap = QPushButton("⇅ 上下对调")
-        b_swap.clicked.connect(lambda: self.cmb_order.setCurrentIndex(1 - self.cmb_order.currentIndex()))
-        form.addRow("", b_swap)
-        self.spin_split = QSpinBox()
-        self.spin_split.setRange(96, CANVAS_H - 96)
-        self.spin_split.setSuffix(" px")
-        self.spin_split.valueChanged.connect(self._on_tpl_param)
-        form.addRow("分割线 Y 位置:", self.spin_split)
+        self.cmb_cell = QComboBox()
+        self.cmb_cell.currentIndexChanged.connect(self._on_cell_pick)
+        form.addRow("选择格子:", self.cmb_cell)
         rv.addLayout(form)
 
-        self.tpl_box_w = {}
-        for key, ttl in (("top", "⬆ 上画框"), ("bottom", "⬇ 下画框")):
-            gb = QGroupBox(ttl)
-            f = QFormLayout(gb)
-            cmb = QComboBox()
-            cmb.addItem("等宽对齐（宽=1080，上下超出裁切）", "width")
-            cmb.addItem("等高对齐（高=画框高，左右超出裁切）", "height")
-            cmb.currentIndexChanged.connect(self._on_tpl_param)
-            ox = QSpinBox()
-            ox.setRange(-2000, 2000)
-            ox.setSingleStep(10)
-            ox.valueChanged.connect(self._on_tpl_param)
-            oy = QSpinBox()
-            oy.setRange(-2000, 2000)
-            oy.setSingleStep(10)
-            oy.valueChanged.connect(self._on_tpl_param)
-            f.addRow("填充规则:", cmb)
-            f.addRow("偏移 X:", ox)
-            f.addRow("偏移 Y:", oy)
-            self.tpl_box_w[key] = (cmb, ox, oy)
-            rv.addWidget(gb)
+        gb = QGroupBox("🔲 当前格子")
+        f = QFormLayout(gb)
+        self.cmb_cell_src = QComboBox()
+        for s in SOURCES:
+            self.cmb_cell_src.addItem(SRC_LABELS[s], s)
+        self.cmb_cell_src.currentIndexChanged.connect(self._on_tpl_param)
+        f.addRow("放哪个视频:", self.cmb_cell_src)
+        self.cmb_cell_fill = QComboBox()
+        for k, lbl in FILL_MODES:
+            self.cmb_cell_fill.addItem(lbl, k)
+        self.cmb_cell_fill.currentIndexChanged.connect(self._on_tpl_param)
+        f.addRow("填充规则:", self.cmb_cell_fill)
+        self.cell_spins = {}
+        for key, lbl, rng, step in (("ox", "画面偏移 X", (-2000, 2000), 10), ("oy", "画面偏移 Y", (-2000, 2000), 10),
+                                    ("px", "格子位置 X", (0, CANVAS_W), 10), ("py", "格子位置 Y", (0, CANVAS_H), 10),
+                                    ("pw", "格子宽度", (20, CANVAS_W), 10), ("ph", "格子高度", (20, CANVAS_H), 10),
+                                    ("border", "白色边框", (0, 60), 1)):
+            sp = QSpinBox()
+            sp.setRange(*rng)
+            sp.setSingleStep(step)
+            sp.setSuffix(" px")
+            sp.valueChanged.connect(self._on_tpl_param)
+            f.addRow(lbl + ":", sp)
+            self.cell_spins[key] = sp
+        self.chk_cell_pip = QCheckBox("画中画小窗（浮在其它格子上面，可自由拖动）")
+        self.chk_cell_pip.toggled.connect(self._on_tpl_param)
+        f.addRow("", self.chk_cell_pip)
+        rv.addWidget(gb)
         rv.addStretch()
         b_save = QPushButton("💾 保存模板")
         b_save.setProperty("class", "ActionBtn")
@@ -1950,62 +2287,111 @@ class DuetVideoUI(QWidget):
     def _on_tpl_lib_select(self, row):
         if row < 0 or row >= len(self.templates):
             return
-        self.edit_tpl = json.loads(json.dumps(self.templates[row]))
+        t = json.loads(json.dumps(self.templates[row]))
+        # 旧版上下分屏模板统一转换为格子格式编辑（渲染结果不变）
+        self.edit_tpl = {"name": t["name"], "cells": json.loads(json.dumps(tpl_cells(t)))}
+        self._sel_cell = 0
         self._load_tpl_editor()
+
+    def _tpl_editor_widgets(self):
+        return [self.cmb_cell, self.cmb_cell_src, self.cmb_cell_fill, self.chk_cell_pip, *self.cell_spins.values()]
 
     def _load_tpl_editor(self):
         t = self.edit_tpl
-        widgets = [self.cmb_order, self.spin_split] + [w for v in self.tpl_box_w.values() for w in v]
-        for w in widgets:
+        cells = t["cells"]
+        self._sel_cell = max(0, min(getattr(self, "_sel_cell", 0), len(cells) - 1))
+        for w in self._tpl_editor_widgets():
             w.blockSignals(True)
-        self.lbl_tpl_name.setText(f"正在编辑：{t['name']}")
-        self.cmb_order.setCurrentIndex(max(0, self.cmb_order.findData(t.get("order", "person_top"))))
-        self.spin_split.setValue(int(round(CANVAS_H * float(t.get("split", 0.5)))))
-        for key, (cmb, ox, oy) in self.tpl_box_w.items():
-            b = t.get(key, {})
-            cmb.setCurrentIndex(max(0, cmb.findData(b.get("fill", "width"))))
-            ox.setValue(int(b.get("ox", 0)))
-            oy.setValue(int(b.get("oy", 0)))
-        for w in widgets:
+        self.lbl_tpl_name.setText(f"正在编辑：{t['name']}（{len(cells)} 个格子）")
+        self.cmb_cell.clear()
+        for i, cl in enumerate(cells):
+            kind = "小窗" if cl.get("pip") else "格子"
+            self.cmb_cell.addItem(f"{kind} {i + 1}：{SRC_LABELS.get(cl.get('src'), cl.get('src'))}", i)
+        self.cmb_cell.setCurrentIndex(self._sel_cell)
+        cl = cells[self._sel_cell]
+        self.cmb_cell_src.setCurrentIndex(max(0, self.cmb_cell_src.findData(cl.get("src"))))
+        self.cmb_cell_fill.setCurrentIndex(max(0, self.cmb_cell_fill.findData(cl.get("fill", "cover"))))
+        x, y, w, h = cell_rect_px(cl)
+        vals = {"ox": cl.get("ox", 0), "oy": cl.get("oy", 0), "px": x, "py": y, "pw": w, "ph": h,
+                "border": cl.get("border", 0)}
+        for k, sp in self.cell_spins.items():
+            sp.setValue(int(vals[k]))
+        self.chk_cell_pip.setChecked(bool(cl.get("pip")))
+        for w in self._tpl_editor_widgets():
             w.blockSignals(False)
         self.redraw_tpl_canvas()
 
     def _read_tpl_editor(self):
-        t = self.edit_tpl
-        t["order"] = self.cmb_order.currentData()
-        t["split"] = self.spin_split.value() / CANVAS_H
-        for key, (cmb, ox, oy) in self.tpl_box_w.items():
-            t[key] = {"fill": cmb.currentData(), "ox": ox.value(), "oy": oy.value()}
+        cells = self.edit_tpl.get("cells")
+        if not cells:
+            return
+        cl = cells[self._sel_cell]
+        cl["src"] = self.cmb_cell_src.currentData()
+        cl["fill"] = self.cmb_cell_fill.currentData()
+        cl["ox"] = self.cell_spins["ox"].value()
+        cl["oy"] = self.cell_spins["oy"].value()
+        cl["border"] = self.cell_spins["border"].value()
+        cl["pip"] = self.chk_cell_pip.isChecked()
+        x, y, w, h = cell_rect_px(cl)
+        sp = self.cell_spins
+        if (sp["px"].value(), sp["py"].value(), sp["pw"].value(), sp["ph"].value()) != (x, y, w, h):
+            cl["x"] = sp["px"].value() / CANVAS_W
+            cl["y"] = sp["py"].value() / CANVAS_H
+            cl["w"] = min(sp["pw"].value(), CANVAS_W - sp["px"].value()) / CANVAS_W
+            cl["h"] = min(sp["ph"].value(), CANVAS_H - sp["py"].value()) / CANVAS_H
 
     def _on_tpl_param(self, *a):
         self._read_tpl_editor()
-        self.redraw_tpl_canvas()
+        self._load_tpl_editor()
+
+    def _on_cell_pick(self, idx):
+        if idx < 0:
+            return
+        self._sel_cell = idx
+        self._load_tpl_editor()
+
+    def _on_canvas_cell_selected(self, idx):
+        if idx != getattr(self, "_sel_cell", 0):
+            self._sel_cell = idx
+            self._load_tpl_editor()
+
+    def _on_cells_dragged(self, cells):
+        self.edit_tpl["cells"] = cells
+        # 只更新数值框，不重建画布格子（避免打断拖动）
+        cl = cells[self._sel_cell]
+        x, y, w, h = cell_rect_px(cl)
+        for k, v in (("px", x), ("py", y), ("pw", w), ("ph", h)):
+            self.cell_spins[k].blockSignals(True)
+            self.cell_spins[k].setValue(v)
+            self.cell_spins[k].blockSignals(False)
+        self.redraw_tpl_canvas(update_cells=False)
 
     def _on_split_dragged(self, ratio):
-        self.spin_split.blockSignals(True)
-        self.spin_split.setValue(int(round(ratio * CANVAS_H)))
-        self.spin_split.blockSignals(False)
-        self._read_tpl_editor()
-        self.redraw_tpl_canvas()
+        pass
 
-    def redraw_tpl_canvas(self):
+    def redraw_tpl_canvas(self, update_cells=True):
         if not hasattr(self, "tpl_canvas"):
             return
-        pimg, vimg = self._tpl_frames
-        img = compose_preview(self.edit_tpl, pimg, vimg, show_split=False)
-        self.tpl_canvas.set_image(img, box_layout(self.edit_tpl)["split_y"] / CANVAS_H)
+        img = compose_preview(self.edit_tpl, self._tpl_frames or {}, show_split=False,
+                              selected=getattr(self, "_sel_cell", -1))
+        self.tpl_canvas.set_image(img)
+        if update_cells:
+            self.tpl_canvas.set_cells(self.edit_tpl.get("cells"))
 
     def refresh_tpl_frames(self):
-        """取第一组素材的真实画面用于模板预览（没有素材则显示色块）。"""
-        pp = self.list_person.paths()
-        vp = self.list_viral.paths()
-        if not pp and not vp:
-            self._tpl_frames = (None, None)
+        """取每列素材的第一个视频，用于模板预览（没有素材则显示色块）。"""
+        paths = {}
+        for s in SOURCES:
+            lw = self._src_list(s)
+            if lw is not None and lw.count():
+                paths[s] = lw.paths()[0]
+        if not paths:
+            self._tpl_frames = {}
             self.redraw_tpl_canvas()
             return
-        if self._tpl_frames != (None, None):
+        if self._tpl_frames:
             return
-        self._start_frame_thread("tpl", pp[0] if pp else "", vp[0] if vp else "", 1.0)
+        self._start_frame_thread("tpl", paths, 1.0)
 
     def _unique_name(self, base):
         names = {t["name"] for t in self.templates}
@@ -2017,11 +2403,14 @@ class DuetVideoUI(QWidget):
         return f"{base} {i}"
 
     def _tpl_new(self):
-        name, ok = QInputDialog.getText(self, "新建模板", "模板名称:", text=self._unique_name("新模板"))
+        dlg = LayoutPickerDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.result_cells:
+            return
+        name, ok = QInputDialog.getText(self, "新建模板", "模板名称:", text=self._unique_name(dlg.result_name))
         if not ok or not name.strip():
             return
         name = self._unique_name(name.strip())
-        self.templates.append(default_template(name))
+        self.templates.append(template_from_cells(name, dlg.result_cells))
         _save_json("templates.json", self.templates)
         self.refresh_tpl_library(select=name)
         self.refresh_tpl_combos()
@@ -2038,6 +2427,8 @@ class DuetVideoUI(QWidget):
         _save_json("templates.json", self.templates)
         self.refresh_tpl_library(select=name)
         self.refresh_tpl_combos()
+        self._sync_source_lists()
+        self._refresh_adj_sources()
         self.redraw_preview()
         QMessageBox.information(self, "已保存", f"模板「{name}」已保存到模板库。")
 
@@ -2114,6 +2505,9 @@ class DuetVideoUI(QWidget):
                 other.setCurrentIndex(max(0, other.findData(name)))
                 other.blockSignals(False)
         self.refresh_tpl_library(select=self.edit_tpl.get("name"))
+        self._sync_source_lists()
+        self._refresh_adj_sources()
+        self._tpl_frames = {}
         self.redraw_preview()
 
     # ══════════════════════════════════════════════════════════════════════
@@ -2255,17 +2649,19 @@ class DuetVideoUI(QWidget):
 
         gb = QGroupBox("🎯 画面单项微调（当前任务）")
         f = QFormLayout(gb)
-        self.adj_w = {}
-        for who, nm in (("person", "人物"), ("viral", "爆款")):
-            for k, lbl, rng in (("dx", "X 移动", (-2000, 2000)), ("dy", "Y 移动", (-2000, 2000)),
-                                ("scale", "缩放 %", (10, 500))):
-                sp = QSpinBox()
-                sp.setRange(*rng)
-                sp.setSingleStep(1 if k == "scale" else 10)
-                sp.setValue(100 if k == "scale" else 0)
-                sp.valueChanged.connect(self._on_adj_change)
-                f.addRow(f"{nm} {lbl}:", sp)
-                self.adj_w[(who, k)] = sp
+        self.cmb_adj_src = QComboBox()
+        self.cmb_adj_src.currentIndexChanged.connect(self._load_adj_widgets)
+        f.addRow("调整哪个视频:", self.cmb_adj_src)
+        self.adj_sp = {}
+        for k, lbl, rng in (("dx", "X 移动", (-2000, 2000)), ("dy", "Y 移动", (-2000, 2000)),
+                            ("scale", "缩放 %", (10, 500))):
+            sp = QSpinBox()
+            sp.setRange(*rng)
+            sp.setSingleStep(1 if k == "scale" else 10)
+            sp.setValue(100 if k == "scale" else 0)
+            sp.valueChanged.connect(self._on_adj_change)
+            f.addRow(f"{lbl}:", sp)
+            self.adj_sp[k] = sp
         b_reset = QPushButton("↺ 重置微调")
         b_reset.clicked.connect(self._reset_adj)
         f.addRow("", b_reset)
@@ -2310,7 +2706,7 @@ class DuetVideoUI(QWidget):
         self.task_list.clear()
         for i, t in enumerate(self.tasks):
             it = QListWidgetItem(f"{i + 1:02d}. {os.path.basename(t['viral'])}")
-            it.setToolTip(f"人物：{t['person']}\n爆款：{t['viral']}\n时长：{t['duration']:.1f}s")
+            it.setToolTip(f"人物：{t['person']}\n主视频：{t['viral']}\n时长：{t['duration']:.1f}s")
             self.task_list.addItem(it)
         self.task_list.blockSignals(False)
         if self.tasks:
@@ -2334,10 +2730,7 @@ class DuetVideoUI(QWidget):
         self.txt_phone.setPlainText(t.get("phone_text", ""))
         for w in (self.txt_title, self.txt_phone):
             w.blockSignals(False)
-        for (who, k), sp in self.adj_w.items():
-            sp.blockSignals(True)
-            sp.setValue(int(t["adj"].get(who, {}).get(k, 100 if k == "scale" else 0)))
-            sp.blockSignals(False)
+        self._refresh_adj_sources()
         
         # Update Scope Radio
         has_task_cfg = "title_cfg" in t or "phone_cfg" in t
@@ -2375,17 +2768,44 @@ class DuetVideoUI(QWidget):
         t["phone_text"] = self.txt_phone.toPlainText()
         self.redraw_preview()
 
+    def _refresh_adj_sources(self):
+        if not hasattr(self, "cmb_adj_src"):
+            return
+        cur = self.cmb_adj_src.currentData()
+        self.cmb_adj_src.blockSignals(True)
+        self.cmb_adj_src.clear()
+        for s in sources_used(self.active_tpl()):
+            self.cmb_adj_src.addItem(SRC_LABELS[s], s)
+        self.cmb_adj_src.setCurrentIndex(max(0, self.cmb_adj_src.findData(cur)))
+        self.cmb_adj_src.blockSignals(False)
+        self._load_adj_widgets()
+
+    def _load_adj_widgets(self, *a):
+        src = self.cmb_adj_src.currentData()
+        vals = {}
+        if self.tasks and src:
+            vals = self.tasks[self.cur_task].setdefault("adj", {}).get(src, {})
+        for k, sp in self.adj_sp.items():
+            sp.blockSignals(True)
+            sp.setValue(int(vals.get(k, 100 if k == "scale" else 0)))
+            sp.blockSignals(False)
+
     def _on_adj_change(self, *a):
-        if not self.tasks:
+        src = self.cmb_adj_src.currentData()
+        if not self.tasks or not src:
             return
         t = self.tasks[self.cur_task]
-        for (who, k), sp in self.adj_w.items():
-            t["adj"].setdefault(who, {})[k] = sp.value()
+        d = t.setdefault("adj", {}).setdefault(src, {})
+        for k, sp in self.adj_sp.items():
+            d[k] = sp.value()
         self.redraw_preview()
 
     def _reset_adj(self):
-        for (who, k), sp in self.adj_w.items():
-            sp.setValue(100 if k == "scale" else 0)
+        if not self.tasks:
+            return
+        self.tasks[self.cur_task]["adj"] = {}
+        self._load_adj_widgets()
+        self.redraw_preview()
 
     def _batch_paste(self, key, title):
         if not self.tasks:
@@ -2427,38 +2847,45 @@ class DuetVideoUI(QWidget):
             self.btn_preview_title.setStyleSheet("")
         self.time_slider.setValue(int(t * 10))
 
+    def _task_paths(self, t):
+        out = {}
+        for s in sources_used(self.active_tpl()):
+            info = task_source(t, s)
+            if info and info[0]:
+                out[s] = info[0]
+        return out
+
     def request_preview_frames(self):
         if not self.tasks or self.stack.currentIndex() != 2:
             return
         t = self.tasks[self.cur_task]
         tm = round(self.cur_time(), 1)
-        if (t["cache"], tm) in self._frame_cache and (t["viral"], tm) in self._frame_cache:
+        paths = self._task_paths(t)
+        if all((pth, tm) in self._frame_cache for pth in paths.values()):
             self.redraw_preview()
             return
-        self._start_frame_thread("preview", t["cache"], t["viral"], tm)
+        self._start_frame_thread("preview", paths, tm)
 
-    def _start_frame_thread(self, tag, ppath, vpath, tm):
+    def _start_frame_thread(self, tag, paths, tm):
         self._frame_req += 1
-        th = FrameThread(tag, ppath, vpath, tm, self._frame_req, self)
+        th = FrameThread(tag, paths, tm, self._frame_req, self)
         th.done.connect(self._on_frames)
         th.finished.connect(lambda: self._threads.remove(th) if th in self._threads else None)
         self._threads.append(th)
         th.start()
 
-    def _on_frames(self, tag, pb, vb, tm, req):
-        pimg = QImage.fromData(pb) if pb else None
-        vimg = QImage.fromData(vb) if vb else None
+    def _on_frames(self, tag, data, tm, req):
+        imgs = {k: (QImage.fromData(b) if b else None) for k, b in data.items()}
         if tag == "tpl":
-            self._tpl_frames = (pimg, vimg)
-            self.redraw_tpl_canvas()
+            self._tpl_frames = {k: v for k, v in imgs.items() if v is not None}
+            self.redraw_tpl_canvas(update_cells=False)
             return
         th = self.sender()
         if th is not None:
-            if th.ppath and pimg is not None:
-                self._frame_cache[(th.ppath, tm)] = pimg
-            if th.vpath and vimg is not None:
-                self._frame_cache[(th.vpath, tm)] = vimg
-        if len(self._frame_cache) > 200:
+            for k, img in imgs.items():
+                if img is not None and th.paths.get(k):
+                    self._frame_cache[(th.paths[k], tm)] = img
+        if len(self._frame_cache) > 300:
             self._frame_cache.clear()
         self.redraw_preview()
 
@@ -2471,14 +2898,13 @@ class DuetVideoUI(QWidget):
         has_task = bool(self.tasks)
         tm = round(self.cur_time(), 1) if has_task else 0.0
         
+        frames = {}
         if has_task:
             task = self.tasks[self.cur_task]
-            pimg = self._frame_cache.get((task["cache"], tm))
-            vimg = self._frame_cache.get((task["viral"], tm))
+            for s, pth in self._task_paths(task).items():
+                frames[s] = self._frame_cache.get((pth, tm))
         else:
             task = {}
-            pimg = None
-            vimg = None
             
         overlays = []
         tc = task.get("title_cfg") or getattr(self, "global_title_cfg", self.title_editor.get_cfg()) if has_task else getattr(self, "global_title_cfg", self.title_editor.get_cfg())
@@ -2505,10 +2931,13 @@ class DuetVideoUI(QWidget):
         if wm_cfg:
             overlays.append(render_watermark_layer(wm_cfg))
             
-        if has_task and (pimg is None or vimg is None):
+        if has_task and any(v is None for v in frames.values()):
             tips.insert(0, "正在读取视频画面…")
-            
-        img = compose_preview(tpl, pimg, vimg, task.get("adj"), overlays, show_split=True)
+        missing = [SRC_LABELS[s] for s in sources_used(tpl) if has_task and s not in frames]
+        if missing:
+            tips.insert(0, f"当前模板需要「{'、'.join(missing)}」，本组任务没有，请回到素材页导入后重新对齐")
+
+        img = compose_preview(tpl, frames, None, task.get("adj"), overlays, show_split=True)
         self.preview_canvas.set_image(img)
         self.lbl_preview_tip.setText("；".join(tips))
 
@@ -2625,6 +3054,16 @@ class DuetVideoUI(QWidget):
         row.addWidget(b_open)
         row.addWidget(b_cache)
         rv.addLayout(row)
+        row2 = QHBoxLayout()
+        b_restore = QPushButton("♻️ 恢复本工程历史")
+        b_restore.setToolTip("当前工程每 30 秒自动保存到它的对齐文件夹，并在 backups 里保留最近 30 份历史快照。")
+        b_restore.clicked.connect(self._restore_backup)
+        b_data = QPushButton("🗂 打开工程文件夹")
+        b_data.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(
+            self.task_dir if self.task_dir and os.path.isdir(self.task_dir) else get_cache_dir())))
+        row2.addWidget(b_restore)
+        row2.addWidget(b_data)
+        rv.addLayout(row2)
         lay.addWidget(right)
         return page
 
@@ -2635,15 +3074,36 @@ class DuetVideoUI(QWidget):
         self.tbl_names.blockSignals(True)
         self.tbl_names.setRowCount(len(self.tasks))
         for i, t in enumerate(self.tasks):
-            a = QTableWidgetItem(os.path.basename(t["viral"]))
-            a.setFlags(a.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            a = QTableWidgetItem(f"{i + 1:02d}. {os.path.basename(t['viral'])}")
+            a.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            a.setCheckState(Qt.CheckState.Unchecked if t.get("skip_export") else Qt.CheckState.Checked)
+            a.setToolTip(t["viral"])
             self.tbl_names.setItem(i, 0, a)
             self.tbl_names.setItem(i, 1, QTableWidgetItem(t.get("out_name") or self._default_out_name(t)))
+            pb = QProgressBar()
+            pb.setRange(0, 100)
+            pb.setValue(0)
+            pb.setFormat("%p%")
+            pb.setTextVisible(True)
+            self.tbl_names.setCellWidget(i, 2, pb)
+        self.tbl_names.blockSignals(False)
+
+    def _select_all_tasks(self, check):
+        self.tbl_names.blockSignals(True)
+        for i in range(self.tbl_names.rowCount()):
+            it = self.tbl_names.item(i, 0)
+            if it: it.setCheckState(Qt.CheckState.Checked if check else Qt.CheckState.Unchecked)
+            if i < len(self.tasks):
+                self.tasks[i]["skip_export"] = not check
         self.tbl_names.blockSignals(False)
 
     def _on_name_edited(self, item):
-        if item.column() == 1 and item.row() < len(self.tasks):
+        if item.row() >= len(self.tasks):
+            return
+        if item.column() == 1:
             self.tasks[item.row()]["out_name"] = item.text().strip()
+        elif item.column() == 0:
+            self.tasks[item.row()]["skip_export"] = item.checkState() != Qt.CheckState.Checked
 
     def _batch_names(self):
         if not self.tasks:
@@ -2685,6 +3145,27 @@ class DuetVideoUI(QWidget):
         if not out_dir:
             QMessageBox.warning(self, "无法导出", "请选择导出文件夹。")
             return
+        need = sources_used(self.active_tpl())
+        lack = [i + 1 for i, t in enumerate(self.tasks) if any(task_source(t, s) is None for s in need)]
+        if lack:
+            QMessageBox.warning(self, "无法导出",
+                                f"当前模板「{self.active_tpl_name}」需要："
+                                f"{'、'.join(SRC_LABELS[s] for s in need)}。\n"
+                                f"第 {', '.join(map(str, lack[:10]))}{' 等' if len(lack) > 10 else ''} 组任务缺少其中的视频。\n\n"
+                                f"请回到素材页导入对应的人物视频列，然后重新「开始对齐」。")
+            return
+        selected = [i for i in range(len(self.tasks))
+                    if self.tbl_names.item(i, 0) is None
+                    or self.tbl_names.item(i, 0).checkState() == Qt.CheckState.Checked]
+        if not selected:
+            QMessageBox.warning(self, "无法导出", "没有勾选任何任务，请至少勾选一个。")
+            return
+        if QMessageBox.question(self, "确认批量导出",
+                                f"即将导出 {len(selected)} / {len(self.tasks)} 个任务到：\n{out_dir}\n\n确定开始吗？",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        self.save_settings()   # 导出前先把当前所有设置落盘，防止中途崩溃丢失
         os.makedirs(out_dir, exist_ok=True)
         if not self.task_dir or not os.path.isdir(self.task_dir):
             self.task_dir = new_task_cache_dir()
@@ -2699,6 +3180,8 @@ class DuetVideoUI(QWidget):
         used = set()
         wm_cfg = getattr(self, "wm_editor", None) and self.wm_editor.get_cfg()
         for i, t in enumerate(self.tasks):
+            if i not in selected:
+                continue
             title_png = phone_png = ""
             tc = t.get("title_cfg") or getattr(self, "global_title_cfg", self.title_editor.get_cfg())
             pc = t.get("phone_cfg") or getattr(self, "global_phone_cfg", self.phone_editor.get_cfg())
@@ -2725,6 +3208,7 @@ class DuetVideoUI(QWidget):
             used.add(name.lower())
             out = os.path.join(out_dir, name + ".mp4")
             jobs.append({
+                "index": i,
                 "task": t, "tpl": tpl, "out": out,
                 "kw": dict(title_png=title_png, title_end=min(tc["time"], t["duration"]),
                            phone_png=phone_png, phone_start=pc["time"],
@@ -2741,9 +3225,19 @@ class DuetVideoUI(QWidget):
         self.btn_render.setEnabled(False)
         self._render_thread = RenderThread(jobs, self.spin_workers.value(), self.cmb_enc.currentData(), self)
         self._render_thread.progress.connect(lambda d, n: self.render_progress.setValue(d))
+        self._render_thread.task_progress.connect(self._on_task_progress)
+        for i in selected:
+            pb = self.tbl_names.cellWidget(i, 2)
+            if pb:
+                pb.setValue(0)
         self._render_thread.log.connect(self.txt_log.appendPlainText)
         self._render_thread.finished_all.connect(self._on_render_done)
         self._render_thread.start()
+
+    def _on_task_progress(self, index, pct):
+        pb = self.tbl_names.cellWidget(index, 2)
+        if pb:
+            pb.setValue(int(pct))
 
     def _on_render_done(self, ok, n):
         self.btn_render.setEnabled(True)
@@ -2835,8 +3329,38 @@ class DuetVideoUI(QWidget):
     # ══════════════════════════════════════════════════════════════════════
     #  设置保存
     # ══════════════════════════════════════════════════════════════════════
+    # 全局 settings.json 只放软件偏好；每次任务的全部参数放在它自己的对齐文件夹 project.json
+    _PREF_KEYS = ("export_dir", "res_idx", "quality_idx", "enc_idx", "workers", "volume",
+                  "global_speed", "max_3min", "mute_person", "mute_viral")
+
     def _load_settings(self):
         s = self.settings
+        state = None
+        proj = s.get("last_project", "")
+        if proj and os.path.isfile(os.path.join(proj, PROJECT_FILE)):
+            try:
+                state = load_project(proj)
+                self.task_dir = proj
+            except Exception as e:
+                print("load project failed:", e)
+        if state is None:
+            # 旧版本把任务直接存在 settings.json 里：迁移过来
+            if s.get("tasks"):
+                state = dict(s)
+                td = s["tasks"][0].get("task_dir", "")
+                self.task_dir = td if td and os.path.isdir(td) else ""
+            else:
+                state = s.get("draft") or {}
+        merged = {k: s[k] for k in self._PREF_KEYS if k in s}
+        merged.update(state)
+        self._apply_state(merged)
+
+    def _apply_state(self, s):
+        """把一份工程数据应用到界面（会先清空当前任务）。"""
+        self.list_person.clear()
+        self.list_viral.clear()
+        self.tasks = []
+        self.aligned = False
         if "title_cfg" in s:
             self.global_title_cfg = s["title_cfg"]
             self.title_editor.set_cfg(s["title_cfg"])
@@ -2849,16 +3373,21 @@ class DuetVideoUI(QWidget):
             self.list_person.add_files(s["person_videos"])
         if s.get("viral_videos"):
             self.list_viral.add_files(s["viral_videos"])
+        for src, lw in self.extra_lists.items():
+            lw.clear()
+            if (s.get("extra_videos") or {}).get(src):
+                lw.add_files(s["extra_videos"][src])
+        self.spin_person_speed.setValue(float(s.get("person_speed", 1.0)))
         if s.get("tasks"):
             self.tasks = s["tasks"]
             self.aligned = s.get("aligned", False)
-            if self.tasks:
-                self.task_dir = self.tasks[0].get("task_dir", "")
-            self.refresh_task_list()
-            self.update_align_status()
+        self._frame_cache.clear()
+        self._tpl_frames = {}
+        self.cur_task = 0
         self.chk_mute_person.setChecked(s.get("mute_person", True))
         self.chk_mute_viral.setChecked(s.get("mute_viral", False))
-        self.spin_speed.setValue(s.get("speed", 1.0))
+        self.spin_speed.setValue(s.get("global_speed", s.get("speed", 1.0)))
+        self.chk_max_3min.setChecked(s.get("max_3min", False))
         if s.get("export_dir"):
             self.txt_export_dir.setText(s["export_dir"])
         self.cmb_res.setCurrentIndex(s.get("res_idx", 0))
@@ -2866,13 +3395,23 @@ class DuetVideoUI(QWidget):
         self.cmb_enc.setCurrentIndex(s.get("enc_idx", 0))
         self.spin_workers.setValue(s.get("workers", 2))
         self.slider_volume.setValue(s.get("volume", 100))
+        if s.get("active_tpl") and self._tpl_by_name(s["active_tpl"]):
+            self.active_tpl_name = s["active_tpl"]
+            self.edit_tpl = dict(self._tpl_by_name(self.active_tpl_name))
+        self._sync_source_lists()
+        self.refresh_task_list()
+        self.refresh_export_table()
+        self.update_align_status()
 
-    def save_settings(self):
-        _save_json("settings.json", {
+    def _project_state(self):
+        """当前这次任务的全部参数。"""
+        return {
+            "version": 1,
             "active_tpl": self.active_tpl_name,
-            "cache_root": self.txt_cache_root.text() if hasattr(self, "txt_cache_root") else "",
             "person_videos": self.list_person.paths(),
             "viral_videos": self.list_viral.paths(),
+            "extra_videos": {s: lw.paths() for s, lw in self.extra_lists.items()},
+            "person_speed": self.spin_person_speed.value(),
             "tasks": getattr(self, "tasks", []),
             "aligned": getattr(self, "aligned", False),
             "title_cfg": getattr(self, "global_title_cfg", self.title_editor.get_cfg()),
@@ -2880,7 +3419,6 @@ class DuetVideoUI(QWidget):
             "wm_cfg": self.wm_editor.get_cfg(),
             "mute_person": self.chk_mute_person.isChecked(),
             "mute_viral": self.chk_mute_viral.isChecked(),
-            "speed": self.spin_speed.value(),
             "export_dir": self.txt_export_dir.text(),
             "global_speed": self.spin_speed.value(),
             "max_3min": self.chk_max_3min.isChecked(),
@@ -2889,4 +3427,133 @@ class DuetVideoUI(QWidget):
             "enc_idx": self.cmb_enc.currentIndex(),
             "workers": self.spin_workers.value(),
             "volume": self.slider_volume.value(),
-        })
+        }
+
+    def _autosave(self):
+        try:
+            self.save_settings()
+        except Exception as e:
+            print("autosave failed:", e)
+
+    def save_settings(self):
+        state = self._project_state()
+        has_proj = bool(self.task_dir and os.path.isdir(self.task_dir))
+        if has_proj:
+            save_project(self.task_dir, state)
+        prefs = {
+            "active_tpl": self.active_tpl_name,
+            "cache_root": self.txt_cache_root.text() if hasattr(self, "txt_cache_root") else "",
+            "last_project": self.task_dir if has_proj else "",
+            "layout_presets_v1": True,
+        }
+        prefs.update({k: state[k] for k in self._PREF_KEYS})
+        if not has_proj:
+            # 还没对齐（没有工程文件夹）时，只临时记住导入的素材和卡片样式
+            prefs["draft"] = {k: state[k] for k in
+                              ("person_videos", "viral_videos", "extra_videos", "person_speed", "tasks", "aligned",
+                               "title_cfg", "phone_cfg", "wm_cfg")}
+        _save_json("settings.json", prefs)
+
+    def _list_projects(self):
+        root = get_cache_dir()
+        out = []
+        try:
+            for n in os.listdir(root):
+                d = os.path.join(root, n)
+                f = os.path.join(d, PROJECT_FILE)
+                if os.path.isfile(f):
+                    out.append((os.path.getmtime(f), d))
+        except Exception:
+            pass
+        return [d for _, d in sorted(out, reverse=True)]
+
+    def _open_project(self):
+        import time
+        projs = self._list_projects()
+        items = []
+        for d in projs:
+            try:
+                with open(os.path.join(d, PROJECT_FILE), "r", encoding="utf-8") as fh:
+                    n = len(json.load(fh).get("tasks") or [])
+            except Exception:
+                n = "?"
+            t = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.path.getmtime(os.path.join(d, PROJECT_FILE))))
+            mark = "  ← 当前" if self.task_dir and os.path.normcase(d) == os.path.normcase(self.task_dir) else ""
+            items.append(f"{os.path.basename(d)}    （{n} 组任务，{t}）{mark}")
+        browse = "📁 浏览其他位置的文件夹…"
+        items.append(browse)
+        sel, ok = QInputDialog.getItem(self, "打开已对齐工程",
+                                       f"缓存目录：{get_cache_dir()}\n选择要打开的工程：", items, 0, False)
+        if not ok:
+            return
+        if sel == browse:
+            d = QFileDialog.getExistingDirectory(self, "选择以前对齐的文件夹", get_cache_dir())
+            if not d:
+                return
+        else:
+            d = projs[items.index(sel)]
+        if not os.path.isfile(os.path.join(d, PROJECT_FILE)):
+            QMessageBox.warning(self, "无法打开",
+                                "这个文件夹里没有工程文件（project.json）。\n"
+                                "可能是旧版本对齐的文件夹，当时还不会保存任务参数。")
+            return
+        try:
+            data = load_project(d)
+        except Exception as e:
+            QMessageBox.critical(self, "打开失败", f"工程文件读取失败：{e}")
+            return
+        self.save_settings()          # 先保存当前工程
+        self.task_dir = d
+        self._apply_state(data)
+        self.refresh_tpl_combos()
+        self.redraw_preview()
+        self.save_settings()
+        missing = sum(1 for t in self.tasks if t.get("cache") and not os.path.isfile(t["cache"]))
+        msg = f"已打开工程：{os.path.basename(d)}\n共 {len(self.tasks)} 组任务。"
+        if missing:
+            msg += f"\n\n⚠️ 有 {missing} 个对齐视频找不到了，请重新点击「开始对齐」（文字和卡片参数会保留）。"
+            self.aligned = False
+            self.update_align_status()
+        QMessageBox.information(self, "打开工程", msg)
+
+    def _restore_backup(self):
+        import glob, time
+        if not self.task_dir or not os.path.isdir(self.task_dir):
+            QMessageBox.information(self, "恢复本工程历史", "当前还没有工程（请先对齐，或打开已对齐工程）。")
+            return
+        files = sorted(glob.glob(os.path.join(project_backup_dir(self.task_dir), "project_*.json")), reverse=True)
+        if not files:
+            QMessageBox.information(self, "恢复本工程历史", "这个工程还没有历史快照。\n软件运行后会自动保存。")
+            return
+        items = []
+        for f in files:
+            try:
+                with open(f, "r", encoding="utf-8") as fh:
+                    n = len(json.load(fh).get("tasks") or [])
+            except Exception:
+                n = "?"
+            t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(f)))
+            items.append(f"{t}    （{n} 组任务）")
+        sel, ok = QInputDialog.getItem(self, "恢复本工程历史",
+                                       f"工程：{os.path.basename(self.task_dir)}\n选择要恢复的时间点：", items, 0, False)
+        if not ok:
+            return
+        try:
+            with open(files[items.index(sel)], "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as e:
+            QMessageBox.critical(self, "恢复失败", f"快照文件损坏：{e}")
+            return
+        # 先把当前状态单独存一份，便于反悔
+        try:
+            with open(os.path.join(project_backup_dir(self.task_dir),
+                                   f"project_{time.strftime('%Y%m%d_%H%M%S')}_before_restore.json"),
+                      "w", encoding="utf-8") as fh:
+                json.dump(self._project_state(), fh, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        self._apply_state(data)
+        self.refresh_tpl_combos()
+        self.redraw_preview()
+        self.save_settings()
+        QMessageBox.information(self, "恢复完成", f"已恢复到：{sel}")

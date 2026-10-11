@@ -31,6 +31,7 @@ from UI.ui_gdrive_downloader import GDriveDownloaderUI
 from UI.ui_copyright_processor import CopyrightProcessorUI
 from UI.ui_duet_video import DuetVideoUI
 from UI.ui_landscape_to_portrait import LandscapeToPortraitUI
+from UI.ui_auto_speed import AutoSpeedUI
 from UI.ui_ffmpeg_downloader_mgr import (FFmpegDownloaderDialog, get_ffmpeg_status,
                                           get_opencv_status, get_ytdlp_status,
                                           get_mediapipe_status, get_face_detection_status)
@@ -45,7 +46,7 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.5.11")
+        self.setWindowTitle("视频集成工具 v1.5.12")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -56,6 +57,8 @@ class ToolboxApp(QMainWindow):
         self.apply_theme()
         from UI.wheel_guard import install_wheel_guard
         install_wheel_guard()
+        from UI.crash_guard import install as install_crash_guard
+        install_crash_guard(self)
         self._update_components_btn_style()
 
     def setup_ui(self):
@@ -97,9 +100,10 @@ class ToolboxApp(QMainWindow):
         self.item_image = QTreeWidgetItem(["🖼️ 图片批量裁剪"])
         self.item_multi = QTreeWidgetItem(["🎞️ 多片段合成"])
         self.item_screenshot = QTreeWidgetItem(["📸 链接截图"])
+        self.item_speed = QTreeWidgetItem(["⏩ 自动调速"])
         
         cat_video.addChildren([self.item_duet, self.item_video, self.item_img_merge, self.item_copyright, 
-                               self.item_l2p, self.item_image, self.item_multi, self.item_screenshot])
+                               self.item_l2p, self.item_image, self.item_multi, self.item_screenshot, self.item_speed])
         self.nav_tree.addTopLevelItem(cat_video)
 
         # 通用下载
@@ -113,8 +117,7 @@ class ToolboxApp(QMainWindow):
         self.nav_tree.addTopLevelItem(cat_download)
 
         self.nav_tree.expandAll()
-        sidebar_layout.addWidget(self.nav_tree)
-        sidebar_layout.addStretch()
+        sidebar_layout.addWidget(self.nav_tree, 1)
 
         self.btn_components = QPushButton("📦 下载必要组件")
         self.btn_components.setProperty("class", "ActionBtn")
@@ -147,6 +150,7 @@ class ToolboxApp(QMainWindow):
         self.screenshot_tool = AutoScreenshotUI()
         self.youtube_tool    = YouTubeDownloaderUI()
         self.gdrive_tool     = GDriveDownloaderUI()
+        self.speed_tool      = AutoSpeedUI()
 
         self.stacked_widget.addWidget(self.duet_tool)           # 0
         self.stacked_widget.addWidget(self.video_tool)          # 1
@@ -158,6 +162,7 @@ class ToolboxApp(QMainWindow):
         self.stacked_widget.addWidget(self.screenshot_tool)     # 7
         self.stacked_widget.addWidget(self.youtube_tool)        # 8
         self.stacked_widget.addWidget(self.gdrive_tool)         # 9
+        self.stacked_widget.addWidget(self.speed_tool)          # 10
 
         self.content_layout.addWidget(self.stacked_widget)
         self.main_layout.addWidget(self.content_widget)
@@ -173,6 +178,7 @@ class ToolboxApp(QMainWindow):
             id(self.item_screenshot): 7,
             id(self.item_youtube): 8,
             id(self.item_gdrive): 9,
+            id(self.item_speed): 10,
         }
 
         self.nav_tree.itemClicked.connect(self.on_tree_item_clicked)
@@ -548,6 +554,7 @@ class ToolboxApp(QMainWindow):
         self.youtube_tool.save_settings()
         self.screenshot_tool.save_settings()
         self.gdrive_tool.save_settings()
+        self.speed_tool.save_settings()
         if hasattr(self, 'duet_tool'):
             self.duet_tool.save_settings()
         event.accept()
@@ -567,7 +574,7 @@ if __name__ == "__main__":
     _last_error = ctypes.windll.kernel32.GetLastError()
     if _last_error == 183:
         # Instead of showing a popup, try to bring the existing window to front
-        hwnd = ctypes.windll.user32.FindWindowW(None, "视频集成工具 v1.5.11")
+        hwnd = ctypes.windll.user32.FindWindowW(None, "视频集成工具 v1.5.12")
         if hwnd:
             ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE
             ctypes.windll.user32.SetForegroundWindow(hwnd)

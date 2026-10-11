@@ -155,7 +155,7 @@ def _atempo_chain(speed: float) -> str:
 def align_person_video(person_vid: str, viral_vid: str, out_path: str,
                        mute_person: bool = True, speed: float = 1.0) -> dict:
     """
-    以爆款视频时长为基准，将人物视频变速后循环至等长，并裁掉多余尾部。
+    以主视频时长为基准，将人物视频变速后循环至等长，并裁掉多余尾部。
     返回 {'cache': out_path, 'duration': viral_duration}
     """
     v_info = probe_info(viral_vid)
@@ -163,7 +163,7 @@ def align_person_video(person_vid: str, viral_vid: str, out_path: str,
     viral_dur = v_info["duration"]
     person_dur = p_info["duration"]
     if viral_dur <= 0:
-        raise ValueError(f"无法读取爆款视频时长：{os.path.basename(viral_vid)}")
+        raise ValueError(f"无法读取主视频时长：{os.path.basename(viral_vid)}")
     if person_dur <= 0:
         raise ValueError(f"无法读取人物视频时长：{os.path.basename(person_vid)}")
 
@@ -225,17 +225,124 @@ def default_template(name: str = "默认上下分屏") -> dict:
     }
 
 
+# ── 多格 / 画中画 版式 ─────────────────────────────────────────────────────────
+# 模板新格式：{"name": ..., "cells": [cell, ...]}
+# cell = {"src": 视频来源, "x","y","w","h": 占画布比例(0~1), "fill": 填充规则,
+#         "ox","oy": 偏移像素, "pip": 是否画中画小窗, "border": 白色边框像素}
+SOURCES = ["viral", "person", "person2", "person3", "person4"]
+SRC_LABELS = {"viral": "主视频", "person": "人物视频1", "person2": "人物视频2",
+              "person3": "人物视频3", "person4": "人物视频4"}
+FILL_MODES = [("cover", "铺满格子（超出裁切）"), ("width", "等宽对齐（宽=格子宽）"),
+              ("height", "等高对齐（高=格子高）"), ("contain", "完整显示（留黑边）")]
+
+
+def make_cell(src, x, y, w, h, fill="cover", pip=False, border=0):
+    return {"src": src, "x": x, "y": y, "w": w, "h": h, "fill": fill,
+            "ox": 0, "oy": 0, "pip": pip, "border": border}
+
+
+def _layout_presets():
+    T = 1.0 / 3
+    pw, m = 0.28, 0.03                 # 小窗宽度、边距（画布 9:16，小窗也是 9:16 → 高度比例 = 宽度比例）
+    py = 1 - 0.12 - pw                 # 小窗离底部留出一点空间
+    full = make_cell("viral", 0, 0, 1, 1)
+    pip = lambda src, x: make_cell(src, x, py, pw, pw, pip=True, border=6)
+    return [
+        ("常用", "上1 / 下1", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, 1, .5)]),
+        ("常用", "上1/3 / 下2/3", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, 1 - T)]),
+        ("常用", "上2/3 / 下1/3", [make_cell("viral", 0, 0, 1, 2 * T), make_cell("person", 0, 2 * T, 1, T)]),
+        ("常用", "纵向三等分", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, T),
+                           make_cell("person2", 0, 2 * T, 1, T)]),
+        ("多格", "上1 / 下2", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, .5, .5),
+                            make_cell("person2", .5, .5, .5, .5)]),
+        ("多格", "上1 / 下3", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, T, .5),
+                            make_cell("person2", T, .5, T, .5), make_cell("person3", 2 * T, .5, T, .5)]),
+        ("多格", "上1 / 下4", [make_cell("viral", 0, 0, 1, .5),
+                            make_cell("person", 0, .5, .5, .25), make_cell("person2", .5, .5, .5, .25),
+                            make_cell("person3", 0, .75, .5, .25), make_cell("person4", .5, .75, .5, .25)]),
+        ("多格", "四宫格", [make_cell("viral", 0, 0, .5, .5), make_cell("person", .5, 0, .5, .5),
+                         make_cell("person2", 0, .5, .5, .5), make_cell("person3", .5, .5, .5, .5)]),
+        ("画中画", "全屏背景 + 小窗", [full, pip("person", 1 - m - pw)]),
+        ("画中画", "全屏背景 + 双小窗", [full, pip("person", m), pip("person2", 1 - m - pw)]),
+        ("画中画", "全屏背景 + 三小窗", [full, pip("person", m), pip("person2", (1 - pw) / 2),
+                                    pip("person3", 1 - m - pw)]),
+    ]
+
+
+LAYOUT_PRESETS = _layout_presets()
+
+
+def template_from_cells(name: str, cells: list) -> dict:
+    import copy
+    return {"name": name, "cells": copy.deepcopy(cells)}
+
+
+def tpl_cells(tpl: dict) -> list:
+    """统一返回格子列表；旧版「上下分屏」模板自动转换（渲染结果完全一致）。"""
+    if tpl.get("cells"):
+        return tpl["cells"]
+    split_px = max(50, min(CANVAS_H - 50, int(round(CANVAS_H * float(tpl.get("split", 0.5))))))
+    s = split_px / CANVAS_H
+    top_src, bot_src = ("person", "viral") if tpl.get("order", "person_top") == "person_top" else ("viral", "person")
+    out = []
+    for src, y, h, key in ((top_src, 0.0, s, "top"), (bot_src, s, 1 - s, "bottom")):
+        b = tpl.get(key, {}) or {}
+        cell = make_cell(src, 0.0, y, 1.0, h, fill=b.get("fill", "width"))
+        cell["ox"], cell["oy"] = int(b.get("ox", 0)), int(b.get("oy", 0))
+        out.append(cell)
+    return out
+
+
+def _ev(v: float) -> int:
+    return int(round(v / 2.0)) * 2
+
+
+def cell_rect_px(cell: dict) -> tuple:
+    """格子在 1080x1920 画布上的像素矩形 (x, y, w, h)，全部取偶数，相邻格子无缝。"""
+    x1 = max(0, min(CANVAS_W, _ev(float(cell["x"]) * CANVAS_W)))
+    y1 = max(0, min(CANVAS_H, _ev(float(cell["y"]) * CANVAS_H)))
+    x2 = max(0, min(CANVAS_W, _ev((float(cell["x"]) + float(cell["w"])) * CANVAS_W)))
+    y2 = max(0, min(CANVAS_H, _ev((float(cell["y"]) + float(cell["h"])) * CANVAS_H)))
+    return x1, y1, max(2, x2 - x1), max(2, y2 - y1)
+
+
+def ordered_cells(tpl: dict) -> list:
+    """绘制顺序：普通格子在下，画中画小窗在上。返回 [(编号, cell), ...]"""
+    cells = list(enumerate(tpl_cells(tpl)))
+    return [x for x in cells if not x[1].get("pip")] + [x for x in cells if x[1].get("pip")]
+
+
+def sources_used(tpl: dict) -> list:
+    used = {c.get("src") for c in tpl_cells(tpl)}
+    return [s for s in SOURCES if s in used]
+
+
+def layout_split_y(tpl: dict) -> int:
+    """卡片「吸附分割线」使用的 Y：第一条横向分界线；没有分界线（画中画）时用模板 split 或画面中间。"""
+    ys = sorted({cell_rect_px(c)[1] + cell_rect_px(c)[3] for c in tpl_cells(tpl) if not c.get("pip")})
+    ys = [y for y in ys if 0 < y < CANVAS_H]
+    if ys:
+        return ys[0]
+    return int(round(CANVAS_H * float(tpl.get("split") or 0.5)))
+
+
 def box_layout(tpl: dict) -> dict:
-    """
-    返回 {'split_y': int, 'person': (y, h, box_cfg), 'viral': (y, h, box_cfg)}
-    """
-    split_y = int(round(CANVAS_H * float(tpl.get("split", 0.5))))
-    split_y = max(50, min(CANVAS_H - 50, split_y))
-    top = (0, split_y, tpl.get("top", {}))
-    bottom = (split_y, CANVAS_H - split_y, tpl.get("bottom", {}))
-    if tpl.get("order", "person_top") == "person_top":
-        return {"split_y": split_y, "person": top, "viral": bottom}
-    return {"split_y": split_y, "person": bottom, "viral": top}
+    return {"split_y": layout_split_y(tpl), "cells": tpl_cells(tpl)}
+
+
+def place_in_cell(src_w: int, src_h: int, cw: int, ch: int, cell: dict, adj: dict = None) -> tuple:
+    """视频在格子内的缩放尺寸与位置（相对格子左上角）。返回 (sw, sh, x, y)"""
+    adj = adj or {}
+    if src_w <= 0 or src_h <= 0:
+        src_w, src_h = CANVAS_W, CANVAS_H
+    fill = cell.get("fill", "cover")
+    sx, sy = cw / src_w, ch / src_h
+    s = {"width": sx, "height": sy, "contain": min(sx, sy)}.get(fill, max(sx, sy))
+    s *= float(adj.get("scale", 100)) / 100.0
+    sw, sh = _even(src_w * s), _even(src_h * s)
+    x = (cw - sw) / 2 + int(cell.get("ox", 0)) + int(adj.get("dx", 0))
+    y = (ch - sh) / 2 + int(cell.get("oy", 0)) + int(adj.get("dy", 0))
+    return sw, sh, int(round(x)), int(round(y))
 
 
 def _even(v: float) -> int:
@@ -243,25 +350,21 @@ def _even(v: float) -> int:
     return max(2, v - (v % 2))
 
 
-def place_in_box(src_w: int, src_h: int, box_h: int, box_cfg: dict, adj: dict = None) -> tuple:
-    """
-    计算视频在画框中的缩放尺寸与位置（相对画框左上角）。
-    等宽对齐：宽度缩放至 1080；等高对齐：高度缩放至画框高度；超出部分由画框裁切。
-    adj: 单任务微调 {'dx', 'dy', 'scale'(百分比)}
-    返回 (sw, sh, x, y)
-    """
-    adj = adj or {}
-    if src_w <= 0 or src_h <= 0:
-        src_w, src_h = CANVAS_W, CANVAS_H
-    if box_cfg.get("fill", "width") == "height":
-        s = box_h / src_h
-    else:
-        s = CANVAS_W / src_w
-    s *= float(adj.get("scale", 100)) / 100.0
-    sw, sh = _even(src_w * s), _even(src_h * s)
-    x = (CANVAS_W - sw) / 2 + int(box_cfg.get("ox", 0)) + int(adj.get("dx", 0))
-    y = (box_h - sh) / 2 + int(box_cfg.get("oy", 0)) + int(adj.get("dy", 0))
-    return sw, sh, int(round(x)), int(round(y))
+def task_source(task: dict, src: str):
+    """返回 (路径, 宽, 高, 是否有声音)；任务里没有这一路视频时返回 None。"""
+    if src == "viral":
+        return task.get("viral"), task.get("v_w", 0), task.get("v_h", 0), bool(task.get("v_audio"))
+    if src == "person":
+        return task.get("cache"), task.get("p_w", 0), task.get("p_h", 0), bool(task.get("p_audio"))
+    try:
+        k = int(src.replace("person", "")) - 2
+    except ValueError:
+        return None
+    ex = task.get("extra") or []
+    if 0 <= k < len(ex) and ex[k].get("cache"):
+        e = ex[k]
+        return e["cache"], e.get("w", 0), e.get("h", 0), bool(e.get("audio"))
+    return None
 
 
 # ── 最终渲染命令 ──────────────────────────────────────────────────────────────
@@ -292,18 +395,21 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
                      mute_viral: bool = False, volume: float = 1.0,
                      out_w: int = 1080, out_h: int = 1920,
                      quality: int = 23, enc_key: str = "cpu") -> list:
-    """task 需包含：cache, viral, duration, p_w, p_h, v_w, v_h, p_audio, v_audio, adj"""
+    """task 需包含：cache, viral, duration, p_w, p_h, v_w, v_h, p_audio, v_audio, adj（可选 extra）"""
     D = float(task["duration"])
-    lay = box_layout(tpl)
-    py, ph, pcfg = lay["person"]
-    vy, vh, vcfg = lay["viral"]
-    adj = task.get("adj", {})
-    psw, psh, px, ppy = place_in_box(task["p_w"], task["p_h"], ph, pcfg, adj.get("person"))
-    vsw, vsh, vx, vvy = place_in_box(task["v_w"], task["v_h"], vh, vcfg, adj.get("viral"))
+    adj = task.get("adj", {}) or {}
+    cells = [(i, cl) for i, cl in ordered_cells(tpl) if task_source(task, cl.get("src"))]
 
-    cmd = [get_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error",
-           "-i", task["cache"], "-i", task["viral"]]
-    idx = 2
+    cmd = [get_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error"]
+    src_idx, src_info = {}, {}
+    for _, cl in cells:
+        sname = cl["src"]
+        if sname not in src_idx:
+            info = task_source(task, sname)
+            src_idx[sname] = len(src_idx)
+            src_info[sname] = info
+            cmd += ["-i", info[0]]
+    idx = len(src_idx)
     title_idx = phone_idx = None
     if title_png and os.path.isfile(title_png):
         cmd += ["-loop", "1", "-t", f"{D:.3f}", "-i", title_png]
@@ -313,25 +419,40 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
         cmd += ["-loop", "1", "-t", f"{D:.3f}", "-i", phone_png]
         phone_idx = idx
         idx += 1
-        
+
     wm_idx = None
     if wm_png and os.path.isfile(wm_png):
         cmd += ["-loop", "1", "-t", f"{D:.3f}", "-i", wm_png]
         wm_idx = idx
         idx += 1
 
-    fc = [
-        f"color=c=black:s={CANVAS_W}x{CANVAS_H}:r=30:d={D:.3f}[base]",
-        f"color=c=black:s={CANVAS_W}x{ph}:r=30:d={D:.3f}[pbox]",
-        f"color=c=black:s={CANVAS_W}x{vh}:r=30:d={D:.3f}[vbox]",
-        f"[0:v]scale={psw}:{psh},setsar=1[pv]",
-        f"[1:v]scale={vsw}:{vsh},setsar=1[vv]",
-        f"[pbox][pv]overlay=x={px}:y={ppy}:eof_action=repeat[pb]",
-        f"[vbox][vv]overlay=x={vx}:y={vvy}:eof_action=repeat[vb]",
-        f"[base][pb]overlay=0:{py}[s1]",
-        f"[s1][vb]overlay=0:{vy}[s2]",
-    ]
-    last = "s2"
+    fc = [f"color=c=black:s={CANVAS_W}x{CANVAS_H}:r=30:d={D:.3f}[base]"]
+    # 同一路视频用在多个格子里时需要 split
+    labels = {}
+    for sname, si in src_idx.items():
+        n = sum(1 for _, cl in cells if cl["src"] == sname)
+        if n == 1:
+            labels[sname] = [f"{si}:v"]
+        else:
+            outs = [f"src{si}_{j}" for j in range(n)]
+            fc.append(f"[{si}:v]split={n}" + "".join(f"[{o}]" for o in outs))
+            labels[sname] = outs
+    last = "base"
+    for k, (ci, cl) in enumerate(cells):
+        x, y, w, h = cell_rect_px(cl)
+        info = src_info[cl["src"]]
+        sw, sh, ox, oy = place_in_cell(info[1], info[2], w, h, cl, adj.get(cl["src"]))
+        lab = labels[cl["src"]].pop(0)
+        b = int(cl.get("border", 0) or 0)
+        if b > 0:
+            fc.append(f"color=c=white:s={w + 2 * b}x{h + 2 * b}:r=30:d={D:.3f}[bd{k}]")
+            fc.append(f"[{last}][bd{k}]overlay={x - b}:{y - b}[lb{k}]")
+            last = f"lb{k}"
+        fc.append(f"color=c=black:s={w}x{h}:r=30:d={D:.3f}[box{k}]")
+        fc.append(f"[{lab}]scale={sw}:{sh},setsar=1[sv{k}]")
+        fc.append(f"[box{k}][sv{k}]overlay=x={ox}:y={oy}:eof_action=repeat[cb{k}]")
+        fc.append(f"[{last}][cb{k}]overlay={x}:{y}[l{k}]")
+        last = f"l{k}"
     if title_idx is not None:
         fc.append(f"[{last}][{title_idx}:v]overlay=0:0:enable='between(t,0,{title_end:.3f})'[s3]")
         last = "s3"
@@ -344,13 +465,14 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
     fc.append(f"[{last}]scale={out_w}:{out_h},format=yuv420p[outv]")
 
     audio_srcs = []
-    if task.get("p_audio"):
-        audio_srcs.append("[0:a]")
-    if task.get("v_audio") and not mute_viral:
-        audio_srcs.append("[1:a]")
+    if "viral" in src_idx and src_info["viral"][3] and not mute_viral:
+        audio_srcs.append(f"[{src_idx['viral']}:a]")
+    for sname in src_idx:
+        if sname != "viral" and src_info[sname][3]:
+            audio_srcs.append(f"[{src_idx[sname]}:a]")
     amap = None
-    if len(audio_srcs) == 2:
-        fc.append(f"{audio_srcs[1]}{audio_srcs[0]}amix=inputs=2:duration=longest:normalize=0,volume={volume:.2f}[outa]")
+    if len(audio_srcs) >= 2:
+        fc.append("".join(audio_srcs) + f"amix=inputs={len(audio_srcs)}:duration=longest:normalize=0,volume={volume:.2f}[outa]")
         amap = "[outa]"
     elif len(audio_srcs) == 1:
         fc.append(f"{audio_srcs[0]}volume={volume:.2f}[outa]")

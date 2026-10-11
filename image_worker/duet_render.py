@@ -14,10 +14,18 @@ from PyQt6.QtGui import (QPainterPathStroker, QImage, QPainter, QColor, QFont, Q
                          QPen, QBrush, QPixmap, QIcon, QFontDatabase, QLinearGradient, QPolygonF,
                          QTransform)
 
-from image_worker.duet_worker import CANVAS_W, CANVAS_H, box_layout, place_in_box, get_install_root
+from image_worker.duet_worker import (CANVAS_W, CANVAS_H, box_layout, get_install_root,
+                                     tpl_cells, ordered_cells, cell_rect_px, place_in_cell, SRC_LABELS)
 
 PERSON_COLOR = QColor("#90CDF4")   # 浅蓝：人物
-VIRAL_COLOR = QColor("#FBB6CE")    # 浅粉：爆款
+VIRAL_COLOR = QColor("#FBB6CE")    # 浅粉：主视频
+SRC_COLORS = {
+    "viral":   QColor("#FBB6CE"),   # 浅粉：主视频
+    "person":  QColor("#90CDF4"),   # 浅蓝：人物1
+    "person2": QColor("#9AE6B4"),   # 浅绿：人物2
+    "person3": QColor("#FBD38D"),   # 浅橙：人物3
+    "person4": QColor("#D6BCFA"),   # 浅紫：人物4
+}
 
 _loaded_fonts = {}
 _bundled_loaded = False
@@ -117,58 +125,77 @@ def template_icon(tpl: dict, w: int = 54, h: int = 96) -> QIcon:
     pm = QPixmap(w, h)
     pm.fill(QColor("#2D3748"))
     p = QPainter(pm)
-    lay = box_layout(tpl)
-    sy = h / CANVAS_H
-    py, ph, _ = lay["person"]
-    vy, vh, _ = lay["viral"]
-    p.fillRect(QRectF(0, py * sy, w, ph * sy), PERSON_COLOR)
-    p.fillRect(QRectF(0, vy * sy, w, vh * sy), VIRAL_COLOR)
-    p.setPen(QPen(QColor("#F6E05E"), 2))
-    p.drawLine(QPointF(0, lay["split_y"] * sy), QPointF(w, lay["split_y"] * sy))
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    sx, sy = w / CANVAS_W, h / CANVAS_H
+    f = QFont("Microsoft YaHei")
+    f.setBold(True)
+    for num, cell in ordered_cells(tpl):
+        x, y, cw, ch = cell_rect_px(cell)
+        r = QRectF(x * sx, y * sy, cw * sx, ch * sy)
+        p.fillRect(r, SRC_COLORS.get(cell.get("src"), QColor("#A0AEC0")))
+        p.setPen(QPen(QColor("#FFFFFF"), 1.5 if cell.get("pip") else 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(r.adjusted(0.5, 0.5, -0.5, -0.5))
+        f.setPixelSize(max(6, int(min(r.width(), r.height()) * 0.55)))
+        p.setFont(f)
+        p.setPen(QColor("#1A202C"))
+        p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(num + 1))
     p.end()
     return QIcon(pm)
 
 
 # ── 画面合成（预览用） ─────────────────────────────────────────────────────────
 
-def _draw_box(p: QPainter, img, y: int, h: int, cfg: dict, adj: dict,
-              color: QColor, label: str):
+def _draw_cell(p: QPainter, num: int, cell: dict, img, adj: dict):
+    x, y, w, h = cell_rect_px(cell)
+    b = int(cell.get("border", 0) or 0)
+    if b > 0:
+        p.fillRect(x - b, y - b, w + 2 * b, h + 2 * b, QColor("#FFFFFF"))
     p.save()
-    p.setClipRect(0, y, CANVAS_W, h)
+    p.setClipRect(x, y, w, h)
+    src = cell.get("src", "")
     if img is None or img.isNull():
-        p.fillRect(0, y, CANVAS_W, h, color)
-        f = QFont("Microsoft YaHei", 42)
+        p.fillRect(x, y, w, h, SRC_COLORS.get(src, QColor("#A0AEC0")))
+        f = QFont("Microsoft YaHei")
         f.setBold(True)
+        f.setPixelSize(max(18, min(56, int(min(w, h) * 0.12))))
         p.setFont(f)
-        p.setPen(QColor("#FFFFFF"))
-        p.drawText(QRectF(0, y, CANVAS_W, h), Qt.AlignmentFlag.AlignCenter, label)
+        p.setPen(QColor("#1A202C"))
+        p.drawText(QRectF(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
+                   f"{num + 1}\n{SRC_LABELS.get(src, src)}")
     else:
-        p.fillRect(0, y, CANVAS_W, h, QColor("#000000"))
-        sw, sh, x, yy = place_in_box(img.width(), img.height(), h, cfg, adj)
-        p.drawImage(QRectF(x, y + yy, sw, sh), img)
+        p.fillRect(x, y, w, h, QColor("#000000"))
+        sw, sh, ox, oy = place_in_cell(img.width(), img.height(), w, h, cell, adj)
+        p.drawImage(QRectF(x + ox, y + oy, sw, sh), img)
     p.restore()
 
 
-def compose_preview(tpl: dict, person_img=None, viral_img=None, adj: dict = None,
-                    overlays: list = None, show_split: bool = True) -> QImage:
+def compose_preview(tpl: dict, frames=None, viral_img=None, adj: dict = None,
+                    overlays: list = None, show_split: bool = True, selected: int = -1) -> QImage:
+    """frames: {来源: QImage}。兼容旧调用 compose_preview(tpl, person_img, viral_img, ...)。"""
+    if not isinstance(frames, dict):
+        frames = {"person": frames, "viral": viral_img}
     adj = adj or {}
     canvas = QImage(CANVAS_W, CANVAS_H, QImage.Format.Format_ARGB32_Premultiplied)
     canvas.fill(QColor("#000000"))
     p = QPainter(canvas)
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    lay = box_layout(tpl)
-    py, ph, pcfg = lay["person"]
-    vy, vh, vcfg = lay["viral"]
-    _draw_box(p, person_img, py, ph, pcfg, adj.get("person"), PERSON_COLOR, "人物视频")
-    _draw_box(p, viral_img, vy, vh, vcfg, adj.get("viral"), VIRAL_COLOR, "爆款视频")
+    for num, cell in ordered_cells(tpl):
+        _draw_cell(p, num, cell, frames.get(cell.get("src")), adj.get(cell.get("src")))
     for ov in overlays or []:
         if ov is not None and not ov.isNull():
             p.drawImage(0, 0, ov)
     if show_split:
         pen = QPen(QColor("#F6E05E"), 4, Qt.PenStyle.DashLine)
         p.setPen(pen)
-        p.drawLine(0, lay["split_y"], CANVAS_W, lay["split_y"])
+        sy = box_layout(tpl)["split_y"]
+        p.drawLine(0, sy, CANVAS_W, sy)
+    if 0 <= selected < len(tpl_cells(tpl)):
+        x, y, w, h = cell_rect_px(tpl_cells(tpl)[selected])
+        p.setPen(QPen(QColor("#00E5FF"), 8))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(x + 4, y + 4, w - 8, h - 8)
     p.end()
     return canvas
 

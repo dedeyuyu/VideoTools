@@ -6,7 +6,7 @@
 ; ============================================================
 
 #define MyAppName      "视频集成工具"
-#define MyAppVersion   "1.5.11"
+#define MyAppVersion   "1.5.12"
 #define MyAppPublisher "VideoTools"
 #define MyAppExeName   "VideoTools.exe"
 #define MyAppURL       "https://github.com"
