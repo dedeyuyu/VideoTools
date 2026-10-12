@@ -21,6 +21,7 @@ a = Analysis(
     datas=[
         # Window icon
         (os.path.join(ROOT, 'log', 'log.ico'), 'log'),
+        (os.path.join(ROOT, 'theme_icons', '*'), 'theme_icons'),
     ],
 
     hiddenimports=[
@@ -55,6 +56,12 @@ a = Analysis(
         'UI.wheel_guard',
         'image_worker.duet_worker',
         'image_worker.duet_render',
+        'UI.i18n',
+        'UI.i18n_en',
+        'UI.ui_settings',
+        'UI.crash_guard',
+        'UI.ui_auto_speed',
+        'image_worker.auto_speed_worker',
     ],
 
     hookspath=[],

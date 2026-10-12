@@ -43,5 +43,468 @@
       "ox": 20,
       "oy": 0
     }
+  },
+  {
+    "name": "常用·上1 / 下1",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.5,
+        "w": 1,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "常用·上1/3 / 下2/3",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.3333333333333333,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.3333333333333333,
+        "w": 1,
+        "h": 0.6666666666666667,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "常用·上2/3 / 下1/3",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.6666666666666666,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.6666666666666666,
+        "w": 1,
+        "h": 0.3333333333333333,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "常用·纵向三等分",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.3333333333333333,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.3333333333333333,
+        "w": 1,
+        "h": 0.3333333333333333,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person2",
+        "x": 0,
+        "y": 0.6666666666666666,
+        "w": 1,
+        "h": 0.3333333333333333,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "多格·上1 / 下2",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.5,
+        "w": 0.5,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person2",
+        "x": 0.5,
+        "y": 0.5,
+        "w": 0.5,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "多格·上1 / 下3",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.5,
+        "w": 0.3333333333333333,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person2",
+        "x": 0.3333333333333333,
+        "y": 0.5,
+        "w": 0.3333333333333333,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person3",
+        "x": 0.6666666666666666,
+        "y": 0.5,
+        "w": 0.3333333333333333,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "多格·上1 / 下4",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0,
+        "y": 0.5,
+        "w": 0.5,
+        "h": 0.25,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person2",
+        "x": 0.5,
+        "y": 0.5,
+        "w": 0.5,
+        "h": 0.25,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person3",
+        "x": 0,
+        "y": 0.75,
+        "w": 0.5,
+        "h": 0.25,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person4",
+        "x": 0.5,
+        "y": 0.75,
+        "w": 0.5,
+        "h": 0.25,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "多格·四宫格",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 0.5,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0.5,
+        "y": 0,
+        "w": 0.5,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person2",
+        "x": 0,
+        "y": 0.5,
+        "w": 0.5,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person3",
+        "x": 0.5,
+        "y": 0.5,
+        "w": 0.5,
+        "h": 0.5,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      }
+    ]
+  },
+  {
+    "name": "画中画·全屏背景 + 小窗",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0.69,
+        "y": 0.6,
+        "w": 0.28,
+        "h": 0.28,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": true,
+        "border": 6
+      }
+    ]
+  },
+  {
+    "name": "画中画·全屏背景 + 双小窗",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0.03,
+        "y": 0.6,
+        "w": 0.28,
+        "h": 0.28,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": true,
+        "border": 6
+      },
+      {
+        "src": "person2",
+        "x": 0.69,
+        "y": 0.6,
+        "w": 0.28,
+        "h": 0.28,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": true,
+        "border": 6
+      }
+    ]
+  },
+  {
+    "name": "画中画·全屏背景 + 三小窗",
+    "cells": [
+      {
+        "src": "viral",
+        "x": 0,
+        "y": 0,
+        "w": 1,
+        "h": 1,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": false,
+        "border": 0
+      },
+      {
+        "src": "person",
+        "x": 0.03,
+        "y": 0.6,
+        "w": 0.28,
+        "h": 0.28,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": true,
+        "border": 6
+      },
+      {
+        "src": "person2",
+        "x": 0.36,
+        "y": 0.6,
+        "w": 0.28,
+        "h": 0.28,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": true,
+        "border": 6
+      },
+      {
+        "src": "person3",
+        "x": 0.69,
+        "y": 0.6,
+        "w": 0.28,
+        "h": 0.28,
+        "fill": "cover",
+        "ox": 0,
+        "oy": 0,
+        "pip": true,
+        "border": 6
+      }
+    ]
   }
 ]

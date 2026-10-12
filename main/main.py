@@ -9,6 +9,10 @@ else:
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root_dir)
 
+APP_VERSION = "1.5.13"
+WINDOW_TITLES = (f"视频集成工具 v{APP_VERSION}", f"VideoTools v{APP_VERSION}")
+
+
 def resource_path(relative_path):
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative_path)
@@ -46,7 +50,7 @@ class ToolboxApp(QMainWindow):
         except Exception:
             pass
 
-        self.setWindowTitle("视频集成工具 v1.5.12")
+        self.setWindowTitle(f"视频集成工具 v{APP_VERSION}")
         self.setMinimumSize(1100, 750)
         self.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico")))) 
         
@@ -124,6 +128,13 @@ class ToolboxApp(QMainWindow):
         self.btn_components.setToolTip("管理必要组件 — FFmpeg / opencv-python\n检测状态 / 一键下载安装")
         self.btn_components.clicked.connect(self._open_components_manager)
         sidebar_layout.addWidget(self.btn_components)
+
+        self.btn_settings = QPushButton(" 设置")
+        self.btn_settings.setIcon(QIcon(resource_path(os.path.join("theme_icons", "settings.svg"))))
+        self.btn_settings.setProperty("class", "ActionBtn")
+        self.btn_settings.setToolTip("软件设置：界面语言（中文 / English）、主题等")
+        self.btn_settings.clicked.connect(self.open_settings)
+        sidebar_layout.addWidget(self.btn_settings)
 
         self.btn_theme = QPushButton("切换亮/暗色")
         self.btn_theme.setProperty("class", "ActionBtn")
@@ -220,6 +231,29 @@ class ToolboxApp(QMainWindow):
             self.btn_components.setToolTip(
                 f"缺少必要组件：{', '.join(missing)}\n点击下载安装"
             )
+
+    def open_settings(self):
+        from UI.ui_settings import SettingsDialog
+        dlg = SettingsDialog(self, is_dark_mode=self.is_dark_mode, version=APP_VERSION)
+        if dlg.exec() != SettingsDialog.DialogCode.Accepted:
+            return
+        if dlg.theme_changed:
+            self.is_dark_mode = dlg.selected_dark_mode()
+            self.apply_theme()
+            self.settings.setValue("is_dark_mode", self.is_dark_mode)
+        if dlg.restart_requested:
+            self.restart_app()
+
+    def restart_app(self):
+        """保存所有设置后重新启动软件（切换语言用）。"""
+        from PyQt6.QtCore import QProcess
+        self.close()                      # closeEvent 里会保存各工具的设置
+        if getattr(sys, "frozen", False):
+            QProcess.startDetached(sys.executable, ["--restart"])
+        else:
+            script = os.path.abspath(sys.argv[0])
+            QProcess.startDetached(sys.executable, [script, "--restart"])
+        QApplication.instance().quit()
 
     def toggle_theme(self):
         self.is_dark_mode = not self.is_dark_mode
@@ -569,18 +603,31 @@ if __name__ == "__main__":
         pass
 
     _MUTEX_NAME = "Global\\VideoToolbox_SingleInstance_v2"
-    ctypes.windll.kernel32.SetLastError(0)
-    _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-    _last_error = ctypes.windll.kernel32.GetLastError()
+    import time as _time
+    _restarting = "--restart" in sys.argv
+    _tries = 50 if _restarting else 1          # 重启时最多等旧窗口 10 秒
+    for _i in range(_tries):
+        ctypes.windll.kernel32.SetLastError(0)
+        _mutex = ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+        _last_error = ctypes.windll.kernel32.GetLastError()
+        if _last_error != 183:
+            break
+        if _i < _tries - 1:
+            ctypes.windll.kernel32.CloseHandle(_mutex)
+            _time.sleep(0.2)
     if _last_error == 183:
         # Instead of showing a popup, try to bring the existing window to front
-        hwnd = ctypes.windll.user32.FindWindowW(None, "视频集成工具 v1.5.12")
-        if hwnd:
-            ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        for _title in WINDOW_TITLES:
+            hwnd = ctypes.windll.user32.FindWindowW(None, _title)
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 9) # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                break
         sys.exit(0)
 
-    app = QApplication(sys.argv)
+    app = QApplication([a for a in sys.argv if a != "--restart"])
+    from UI import i18n
+    i18n.install(app)          # 英文界面：必须在创建任何窗口之前安装
     app.setWindowIcon(QIcon(resource_path(os.path.join("log", "log.ico"))))
     
     from PyQt6.QtWidgets import QSplashScreen
