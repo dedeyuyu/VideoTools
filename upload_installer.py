@@ -2,7 +2,7 @@ import os
 import requests
 import sys
 
-token = "REMOVED_TOKEN"
+token = os.environ.get("GITHUB_TOKEN") or open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "github_token.txt"), encoding="utf-8").read().strip()
 repo_owner = "dedeyuyu"
 repo_name = "VideoTools"
 
