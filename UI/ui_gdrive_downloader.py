@@ -61,14 +61,9 @@ class GDriveWorker(QThread):
 
     # ------------------------------------------------------------------
     def _ytdlp_exe(self) -> str:
-        """返回 yt-dlp 可执行文件路径，优先使用项目根目录中的版本。"""
-        # 本文件位于 UI/，项目根目录在上一级
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        local = os.path.join(root, "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")
-        if os.path.isfile(local):
-            return local
-        import shutil
-        return shutil.which("yt-dlp") or "yt-dlp"
+        """返回 yt-dlp 可执行文件路径，优先使用安装目录/项目根目录中的版本。"""
+        from UI.ui_ffmpeg_downloader_mgr import get_ytdlp_exe
+        return get_ytdlp_exe() or "yt-dlp"
 
     def _build_args(self, url: str, name: str) -> list[str]:
         """构建单条 yt-dlp 命令参数列表。支持任意文件类型（视频/图片/文档等）。"""

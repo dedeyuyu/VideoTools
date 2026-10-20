@@ -6,7 +6,7 @@
 ; ============================================================
 
 #define MyAppName      "视频集成工具"
-#define MyAppVersion   "1.5.13"
+#define MyAppVersion   "1.5.14"
 #define MyAppPublisher "VideoTools"
 #define MyAppExeName   "VideoTools.exe"
 #define MyAppURL       "https://github.com"
@@ -60,9 +60,11 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "..\打包\VideoTools.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\打包\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\打包\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\yt-dlp.exe"; DestDir: "{app}"; Flags: ignoreversion
 
-; 日志图标
+; 日志图标与主题图标
 Source: "..\log\log.ico"; DestDir: "{app}\log"; Flags: ignoreversion
+Source: "..\theme_icons\*"; DestDir: "{app}\theme_icons"; Flags: ignoreversion
 
 [Dirs]
 ; 预先创建 ffmpeg 目录（空），避免首次找不到目录报错

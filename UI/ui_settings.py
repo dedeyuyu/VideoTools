@@ -67,9 +67,15 @@ class SettingsDialog(QDialog):
         root.addWidget(g2)
 
         if version:
+            v_row = QHBoxLayout()
             v = QLabel(f"版本: {version}")
             v.setStyleSheet("color: #A0AEC0;")
-            root.addWidget(v)
+            v_row.addWidget(v)
+            v_row.addStretch()
+            b_upd = QPushButton("🔄 检查更新")
+            b_upd.clicked.connect(lambda: self._open_updater(version))
+            v_row.addWidget(b_upd)
+            root.addLayout(v_row)
 
         # ── 按钮 ──
         btns = QHBoxLayout()
@@ -91,6 +97,14 @@ class SettingsDialog(QDialog):
     def _open_dir(self, path):
         os.makedirs(path, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _open_updater(self, version):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "open_updater"):
+            parent.open_updater()
+        else:
+            from UI.ui_updater import UpdaterDialog
+            UpdaterDialog(self, current_version=version).exec()
 
     def _save(self):
         lang = self.cmb_lang.currentData()

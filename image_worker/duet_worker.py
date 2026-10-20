@@ -260,6 +260,20 @@ def _layout_presets():
         ("多格", "上1 / 下4", [make_cell("viral", 0, 0, 1, .5),
                             make_cell("person", 0, .5, .5, .25), make_cell("person2", .5, .5, .5, .25),
                             make_cell("person3", 0, .75, .5, .25), make_cell("person4", .5, .75, .5, .25)]),
+        ("多格", "五格（左2右1 / 下2）", [
+            make_cell("viral", .38, 0, .62, 2 * T),
+            make_cell("person", 0, 0, .38, T),
+            make_cell("person2", 0, T, .38, T),
+            make_cell("person3", 0, 2 * T, .5, 1 - 2 * T),
+            make_cell("person4", .5, 2 * T, .5, 1 - 2 * T),
+        ]),
+        ("多格", "五格（左1右2 / 下2）", [
+            make_cell("viral", 0, 0, .62, 2 * T),
+            make_cell("person", .62, 0, .38, T),
+            make_cell("person2", .62, T, .38, T),
+            make_cell("person3", 0, 2 * T, .5, 1 - 2 * T),
+            make_cell("person4", .5, 2 * T, .5, 1 - 2 * T),
+        ]),
         ("多格", "四宫格", [make_cell("viral", 0, 0, .5, .5), make_cell("person", .5, 0, .5, .5),
                          make_cell("person2", 0, .5, .5, .5), make_cell("person3", .5, .5, .5, .5)]),
         ("画中画", "全屏背景 + 小窗", [full, pip("person", 1 - m - pw)]),
@@ -318,9 +332,14 @@ def sources_used(tpl: dict) -> list:
 
 
 def layout_split_y(tpl: dict) -> int:
-    """卡片「吸附分割线」使用的 Y：第一条横向分界线；没有分界线（画中画）时用模板 split 或画面中间。"""
-    ys = sorted({cell_rect_px(c)[1] + cell_rect_px(c)[3] for c in tpl_cells(tpl) if not c.get("pip")})
-    ys = [y for y in ys if 0 < y < CANVAS_H]
+    """卡片「吸附分割线」使用的 Y：优先取贯穿全宽的第一条横向分界线；没有分界线（画中画）时用模板 split 或画面中间。"""
+    cells = [c for c in tpl_cells(tpl) if not c.get("pip")]
+    rects = [cell_rect_px(c) for c in cells]
+    ys = sorted({y + h for _, y, _, h in rects if 0 < y + h < CANVAS_H})
+    for y in ys:
+        span = sum(w for _, cy, w, ch in rects if abs((cy + ch) - y) <= 2)
+        if span >= CANVAS_W - 4:
+            return y
     if ys:
         return ys[0]
     return int(round(CANVAS_H * float(tpl.get("split") or 0.5)))

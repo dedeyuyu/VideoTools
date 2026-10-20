@@ -87,14 +87,9 @@ class ScreenshotWorker(QThread):
     # ── 下载 ──────────────────────────────────────────────────────────────
 
     def _ytdlp_exe(self) -> str:
-        """返回 yt-dlp 可执行文件路径，优先使用项目根目录中的版本。"""
-        # 本文件位于 image_worker/，项目根目录在上一级
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        local = os.path.join(root, "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")
-        if os.path.isfile(local):
-            return local
-        found = shutil.which("yt-dlp")
-        return found or "yt-dlp"
+        """返回 yt-dlp 可执行文件路径，优先使用安装目录/项目根目录中的版本。"""
+        from UI.ui_ffmpeg_downloader_mgr import get_ytdlp_exe
+        return get_ytdlp_exe() or "yt-dlp"
 
     def _download_video(self, url: str, temp_dir: str, cookie_file: str = ""):
         """

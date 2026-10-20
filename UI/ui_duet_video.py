@@ -45,6 +45,19 @@ SAMPLE_PHONE = "【示例】电话 400-000-0000"
 #  通用小工具
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _theme_icon(name: str) -> str:
+    import sys
+    if hasattr(sys, "_MEIPASS"):
+        p = os.path.join(sys._MEIPASS, "theme_icons", name)
+        if os.path.isfile(p):
+            return p
+    if getattr(sys, "frozen", False):
+        p = os.path.join(os.path.dirname(sys.executable), "theme_icons", name)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "theme_icons", name)
+
+
 def _get_all_presets():
     from UI.default_presets import DEFAULT_PRESETS
     import copy
@@ -370,7 +383,34 @@ class CanvasView(QWidget):
             cl = self._cells[hit[1]]
             self._drag = ("resize", hit[1], cl["h"] / max(1e-6, cl["w"]))
         elif hit[0] == "edge":
-            self._drag = ("edge", hit[1], hit[2])
+            axis, v0 = hit[1], hit[2]
+            pos, size = ("x", "w") if axis == "x" else ("y", "h")
+            op_pos, op_size = ("y", "h") if axis == "x" else ("x", "w")
+            along = fy if axis == "x" else fx
+            eps = 0.003
+            cand_before = [i for i, cl in enumerate(self._cells) if not cl.get("pip") and abs(cl[pos] + cl[size] - v0) < eps]
+            cand_after = [i for i, cl in enumerate(self._cells) if not cl.get("pip") and abs(cl[pos] - v0) < eps]
+            all_cand = cand_before + cand_after
+            seed = [i for i in all_cand if self._cells[i][op_pos] - eps <= along <= self._cells[i][op_pos] + self._cells[i][op_size] + eps]
+            if seed:
+                seg_lo = min(self._cells[i][op_pos] for i in seed)
+                seg_hi = max(self._cells[i][op_pos] + self._cells[i][op_size] for i in seed)
+                changed = True
+                while changed:
+                    changed = False
+                    for i in all_cand:
+                        clo = self._cells[i][op_pos]
+                        chi = clo + self._cells[i][op_size]
+                        if min(seg_hi, chi) - max(seg_lo, clo) > eps:
+                            if clo < seg_lo - eps or chi > seg_hi + eps:
+                                seg_lo = min(seg_lo, clo)
+                                seg_hi = max(seg_hi, chi)
+                                changed = True
+                before_idxs = [i for i in cand_before if min(seg_hi, self._cells[i][op_pos] + self._cells[i][op_size]) - max(seg_lo, self._cells[i][op_pos]) > eps]
+                after_idxs = [i for i in cand_after if min(seg_hi, self._cells[i][op_pos] + self._cells[i][op_size]) - max(seg_lo, self._cells[i][op_pos]) > eps]
+            else:
+                before_idxs, after_idxs = cand_before, cand_after
+            self._drag = ("edge", axis, before_idxs, after_idxs)
 
     def mouseMoveEvent(self, e):
         fx, fy = self._to_frac(e.position())
@@ -411,12 +451,11 @@ class CanvasView(QWidget):
                 w = h / d[2]
             cl["w"], cl["h"] = w, h
         elif d[0] == "edge":
-            axis, v0 = d[1], d[2]
+            _, axis, before_idxs, after_idxs = d
             pos, size = ("x", "w") if axis == "x" else ("y", "h")
             v = fx if axis == "x" else fy
-            eps = 0.002
-            before = [cl for cl in self._cells if not cl.get("pip") and abs(cl[pos] + cl[size] - v0) < eps]
-            after = [cl for cl in self._cells if not cl.get("pip") and abs(cl[pos] - v0) < eps]
+            before = [self._cells[i] for i in before_idxs]
+            after = [self._cells[i] for i in after_idxs]
             lo = max([cl[pos] + m for cl in before] + [m])
             hi = min([cl[pos] + cl[size] - m for cl in after] + [1 - m])
             v = max(lo, min(hi, v))
@@ -425,7 +464,6 @@ class CanvasView(QWidget):
             for cl in after:
                 cl[size] = cl[pos] + cl[size] - v
                 cl[pos] = v
-            self._drag = ("edge", axis, v)
         self.cellsChanged.emit([dict(cl) for cl in self._cells])
         self.update()
 
@@ -528,10 +566,7 @@ class ColorButton(QWidget):
         
         self.btn_drop = QPushButton()
         self.btn_drop.setFixedSize(30, 30)
-        import os
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        icon_path = os.path.join(base_dir, "theme_icons", "eyedropper.svg")
-        self.btn_drop.setIcon(QIcon(icon_path))
+        self.btn_drop.setIcon(QIcon(_theme_icon("eyedropper.svg")))
         self.btn_drop.setToolTip("屏幕吸管：点击后，再点击屏幕任意位置吸取颜色")
         self.btn_drop.clicked.connect(self._start_eyedropper)
         
@@ -919,32 +954,33 @@ class CardEditor(QWidget):
         pr.addWidget(QLabel("预设:"))
         pr.addWidget(self.cmb_preset, 1)
         
-        import os
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        
         b_rename = QPushButton()
-        b_rename.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "rename.svg")))
+        b_rename.setIcon(QIcon(_theme_icon("rename.svg")))
+        b_rename.setIconSize(QSize(18, 18))
         b_rename.setFixedSize(32, 32)
         b_rename.setToolTip("重命名当前预设")
         b_rename.clicked.connect(self._rename_preset)
         pr.addWidget(b_rename)
         
         b_update = QPushButton()
-        b_update.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "update.svg")))
+        b_update.setIcon(QIcon(_theme_icon("update.svg")))
+        b_update.setIconSize(QSize(18, 18))
         b_update.setFixedSize(32, 32)
         b_update.setToolTip("将当前修改更新到此预设")
         b_update.clicked.connect(self._update_preset)
         pr.addWidget(b_update)
         
         b_save_as = QPushButton()
-        b_save_as.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "save_as.svg")))
+        b_save_as.setIcon(QIcon(_theme_icon("save_as.svg")))
+        b_save_as.setIconSize(QSize(18, 18))
         b_save_as.setFixedSize(32, 32)
         b_save_as.setToolTip("另存为新的预设")
         b_save_as.clicked.connect(self._save_preset)
         pr.addWidget(b_save_as)
         
         b_del = QPushButton()
-        b_del.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "delete.svg")))
+        b_del.setIcon(QIcon(_theme_icon("delete.svg")))
+        b_del.setIconSize(QSize(18, 18))
         b_del.setFixedSize(32, 32)
         b_del.setToolTip("删除选中的预设")
         b_del.clicked.connect(self._del_preset)
@@ -957,14 +993,16 @@ class CardEditor(QWidget):
         pr.addWidget(line)
         
         b_import = QPushButton()
-        b_import.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "import.svg")))
+        b_import.setIcon(QIcon(_theme_icon("import.svg")))
+        b_import.setIconSize(QSize(18, 18))
         b_import.setFixedSize(32, 32)
         b_import.setToolTip("导入预设 (支持导入单个或批量预设文件)")
         b_import.clicked.connect(self._import_preset)
         pr.addWidget(b_import)
         
         b_export = QPushButton()
-        b_export.setIcon(QIcon(os.path.join(base_dir, "theme_icons", "export.svg")))
+        b_export.setIcon(QIcon(_theme_icon("export.svg")))
+        b_export.setIconSize(QSize(18, 18))
         b_export.setFixedSize(32, 32)
         b_export.setToolTip("导出当前选中的预设")
         b_export.clicked.connect(self._export_preset)
@@ -1765,8 +1803,8 @@ class DuetVideoUI(QWidget):
             self.templates = [default_template()]
             _save_json("templates.json", self.templates)
         self.settings = _load_json("settings.json", {})
-        if not self.settings.get("layout_presets_v1"):
-            # 第一次升级：把多格 / 画中画版式加入模板库
+        if not self.settings.get("layout_presets_v3"):
+            # 升级：把多格 / 画中画版式增量加入模板库
             names = {t["name"] for t in self.templates}
             for tab, name, cells in LAYOUT_PRESETS:
                 nm = f"{tab}·{name}"
@@ -1774,6 +1812,8 @@ class DuetVideoUI(QWidget):
                     self.templates.append(template_from_cells(nm, cells))
             _save_json("templates.json", self.templates)
             self.settings["layout_presets_v1"] = True
+            self.settings["layout_presets_v2"] = True
+            self.settings["layout_presets_v3"] = True
         set_cache_root(self.settings.get("cache_root", ""))
         self.task_dir = ""
         self.active_tpl_name = self.settings.get("active_tpl", self.templates[0]["name"])
@@ -1990,10 +2030,9 @@ class DuetVideoUI(QWidget):
         v.addLayout(opt)
 
         btns = QHBoxLayout()
-        icon_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "theme_icons")
         def _ib(icon, tip, text=""):
             b = QPushButton(text)
-            b.setIcon(QIcon(os.path.join(icon_dir, icon)))
+            b.setIcon(QIcon(_theme_icon(icon)))
             b.setIconSize(QSize(16, 16))
             b.setToolTip(tip)
             if not text:
@@ -3445,6 +3484,8 @@ class DuetVideoUI(QWidget):
             "cache_root": self.txt_cache_root.text() if hasattr(self, "txt_cache_root") else "",
             "last_project": self.task_dir if has_proj else "",
             "layout_presets_v1": True,
+            "layout_presets_v2": True,
+            "layout_presets_v3": True,
         }
         prefs.update({k: state[k] for k in self._PREF_KEYS})
         if not has_proj:

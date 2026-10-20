@@ -9,7 +9,7 @@ else:
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root_dir)
 
-APP_VERSION = "1.5.13"
+APP_VERSION = "1.5.14"
 WINDOW_TITLES = (f"视频集成工具 v{APP_VERSION}", f"VideoTools v{APP_VERSION}")
 
 
@@ -34,6 +34,7 @@ from UI.ui_auto_screenshot import AutoScreenshotUI
 from UI.ui_gdrive_downloader import GDriveDownloaderUI
 from UI.ui_copyright_processor import CopyrightProcessorUI
 from UI.ui_duet_video import DuetVideoUI
+from UI.ui_quick_merge import QuickMergeUI
 from UI.ui_landscape_to_portrait import LandscapeToPortraitUI
 from UI.ui_auto_speed import AutoSpeedUI
 from UI.ui_ffmpeg_downloader_mgr import (FFmpegDownloaderDialog, get_ffmpeg_status,
@@ -64,6 +65,10 @@ class ToolboxApp(QMainWindow):
         from UI.crash_guard import install as install_crash_guard
         install_crash_guard(self)
         self._update_components_btn_style()
+        self._latest_release_info = None
+        self._bg_update_thread = None
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(2500, self._check_update_silently)
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -97,6 +102,7 @@ class ToolboxApp(QMainWindow):
         cat_video.setFlags(cat_video.flags() & ~Qt.ItemFlag.ItemIsSelectable)
         
         self.item_duet = QTreeWidgetItem(["✨ 合拍视频批量合成"])
+        self.item_quick_merge = QTreeWidgetItem(["⚡ 快速合并"])
         self.item_video = QTreeWidgetItem(["🚀 视频合并与转场"])
         self.item_img_merge = QTreeWidgetItem(["✨ 图片合并成视频"])
         self.item_copyright = QTreeWidgetItem(["🎨 处理版权图片"])
@@ -106,7 +112,7 @@ class ToolboxApp(QMainWindow):
         self.item_screenshot = QTreeWidgetItem(["📸 链接截图"])
         self.item_speed = QTreeWidgetItem(["⏩ 自动调速"])
         
-        cat_video.addChildren([self.item_duet, self.item_video, self.item_img_merge, self.item_copyright, 
+        cat_video.addChildren([self.item_duet, self.item_quick_merge, self.item_video, self.item_img_merge, self.item_copyright, 
                                self.item_l2p, self.item_image, self.item_multi, self.item_screenshot, self.item_speed])
         self.nav_tree.addTopLevelItem(cat_video)
 
@@ -128,6 +134,12 @@ class ToolboxApp(QMainWindow):
         self.btn_components.setToolTip("管理必要组件 — FFmpeg / opencv-python\n检测状态 / 一键下载安装")
         self.btn_components.clicked.connect(self._open_components_manager)
         sidebar_layout.addWidget(self.btn_components)
+
+        self.btn_update = QPushButton("🔄 检查更新")
+        self.btn_update.setProperty("class", "ActionBtn")
+        self.btn_update.setToolTip("检测 GitHub 上是否有新版本并直接下载完成更新")
+        self.btn_update.clicked.connect(self.open_updater)
+        sidebar_layout.addWidget(self.btn_update)
 
         self.btn_settings = QPushButton(" 设置")
         self.btn_settings.setIcon(QIcon(resource_path(os.path.join("theme_icons", "settings.svg"))))
@@ -162,6 +174,7 @@ class ToolboxApp(QMainWindow):
         self.youtube_tool    = YouTubeDownloaderUI()
         self.gdrive_tool     = GDriveDownloaderUI()
         self.speed_tool      = AutoSpeedUI()
+        self.quick_merge_tool = QuickMergeUI()
 
         self.stacked_widget.addWidget(self.duet_tool)           # 0
         self.stacked_widget.addWidget(self.video_tool)          # 1
@@ -174,6 +187,7 @@ class ToolboxApp(QMainWindow):
         self.stacked_widget.addWidget(self.youtube_tool)        # 8
         self.stacked_widget.addWidget(self.gdrive_tool)         # 9
         self.stacked_widget.addWidget(self.speed_tool)          # 10
+        self.stacked_widget.addWidget(self.quick_merge_tool)    # 11
 
         self.content_layout.addWidget(self.stacked_widget)
         self.main_layout.addWidget(self.content_widget)
@@ -190,6 +204,7 @@ class ToolboxApp(QMainWindow):
             id(self.item_youtube): 8,
             id(self.item_gdrive): 9,
             id(self.item_speed): 10,
+            id(self.item_quick_merge): 11,
         }
 
         self.nav_tree.itemClicked.connect(self.on_tree_item_clicked)
@@ -231,6 +246,32 @@ class ToolboxApp(QMainWindow):
             self.btn_components.setToolTip(
                 f"缺少必要组件：{', '.join(missing)}\n点击下载安装"
             )
+
+    def _check_update_silently(self):
+        """启动后在后台静默检查是否有新版本，如有则高亮侧边栏更新按钮。"""
+        from UI.ui_updater import UpdateCheckThread
+        self._bg_update_thread = UpdateCheckThread(self)
+        self._bg_update_thread.result_ready.connect(self._on_silent_update_checked)
+        self._bg_update_thread.start()
+
+    def _on_silent_update_checked(self, info: dict):
+        from UI.ui_updater import is_newer_version
+        self._latest_release_info = info
+        remote_ver = info.get("version", "")
+        if is_newer_version(remote_ver, APP_VERSION):
+            self.btn_update.setText(f"🔄 发现新版本 v{remote_ver}")
+            self.btn_update.setStyleSheet(
+                "QPushButton { background-color: #38A169; color: white; font-weight: bold; }"
+                "QPushButton:hover { background-color: #2F855A; }"
+            )
+            self.btn_update.setToolTip(f"发现新版本 v{remote_ver}，点击立即下载并完成更新")
+
+    def open_updater(self):
+        from UI.ui_updater import UpdaterDialog
+        dlg = UpdaterDialog(self, current_version=APP_VERSION, preloaded_info=self._latest_release_info)
+        dlg.exec()
+        if dlg.release_info:
+            self._on_silent_update_checked(dlg.release_info)
 
     def open_settings(self):
         from UI.ui_settings import SettingsDialog
@@ -564,16 +605,14 @@ class ToolboxApp(QMainWindow):
                 QDialog { background-color: #F8F9FA; }
                 QCheckBox, QLabel { background: transparent; }
             """
-            import os
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            icon_dir = os.path.join(base_dir, "theme_icons").replace("\\", "/")
+            icon_dir = resource_path("theme_icons").replace("\\", "/")
             qss += f"""
                 QCheckBox::indicator {{ width: 16px; height: 16px; image: url('{icon_dir}/checkbox_unchecked.svg'); }}
                 QCheckBox::indicator:checked {{ image: url('{icon_dir}/checkbox_checked.svg'); }}
                 QRadioButton::indicator {{ width: 16px; height: 16px; image: url('{icon_dir}/radio_unchecked.svg'); }}
                 QRadioButton::indicator:checked {{ image: url('{icon_dir}/radio_checked.svg'); }}
             """
-            
+
         self.setStyleSheet(qss)
 
     def closeEvent(self, event):
@@ -591,6 +630,8 @@ class ToolboxApp(QMainWindow):
         self.speed_tool.save_settings()
         if hasattr(self, 'duet_tool'):
             self.duet_tool.save_settings()
+        if hasattr(self, 'quick_merge_tool'):
+            self.quick_merge_tool.save_settings()
         event.accept()
 
 if __name__ == "__main__":

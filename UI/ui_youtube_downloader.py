@@ -19,12 +19,19 @@ from PyQt6.QtGui import QFont, QColor
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _find_exe(name: str) -> str:
-    """返回可执行文件的完整路径，优先查找项目根目录，找不到再回退系统 PATH。"""
-    # 优先：项目根目录（本文件位于 UI/，根目录在上一级）
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    local = os.path.join(root, name + (".exe" if sys.platform == "win32" else ""))
-    if os.path.isfile(local):
-        return local
+    """返回可执行文件的完整路径，优先查找软件安装目录/项目根目录，找不到再回退系统 PATH。"""
+    exe_file = name + (".exe" if sys.platform == "win32" else "")
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(os.path.dirname(sys.executable))
+        roots.append(os.path.join(os.path.dirname(sys.executable), "ffmpeg"))
+    if hasattr(sys, "_MEIPASS"):
+        roots.append(sys._MEIPASS)
+    roots.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    for r in roots:
+        local = os.path.join(r, exe_file)
+        if os.path.isfile(local):
+            return local
     return shutil.which(name) or ""
 
 
@@ -53,23 +60,23 @@ def _node_path() -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class UpdateWorker(QThread):
-    """在后台线程中执行 pip install --upgrade yt-dlp。"""
+    """在后台线程中下载或更新独立版 yt-dlp.exe。"""
     log_line  = pyqtSignal(str)
     finished  = pyqtSignal(bool, str)   # (success, new_version)
 
     def run(self):
-        self.log_line.emit("[UPDATE] 正在升级 yt-dlp，请稍候...")
+        self.log_line.emit("[UPDATE] 正在下载/更新 yt-dlp，请稍候...")
         try:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, encoding="utf-8", errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-            for line in proc.stdout:
-                self.log_line.emit(f"[pip] {line.rstrip()}")
-            proc.wait()
-            if proc.returncode == 0:
+            from UI.ui_ffmpeg_downloader_mgr import YtdlpDownloadThread
+            dl = YtdlpDownloadThread()
+            dl.progress.connect(lambda pct, msg: self.log_line.emit(f"[{pct}%] {msg}"))
+            ok_holder = [False]
+            def _done(ok, msg):
+                ok_holder[0] = ok
+                self.log_line.emit(f"[UPDATE] {msg}")
+            dl.finished.connect(_done)
+            dl.run()
+            if ok_holder[0]:
                 ver = _ytdlp_version()
                 self.finished.emit(True, ver)
             else:

@@ -50,46 +50,69 @@ def get_ffmpeg_status() -> dict:
     }
 
 
-def _run_check(code: str) -> str:
-    """在独立子进程中执行 Python 代码并返回 stdout，失败返回空字符串。"""
-    try:
-        r = subprocess.run(
-            [sys.executable, "-c", code],
-            capture_output=True, text=True, timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except Exception:
-        return ""
+def get_ytdlp_exe() -> str:
+    """查找本地或系统中的 yt-dlp 可执行文件。"""
+    import shutil
+    exe_name = "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
+    root = _get_install_root()
+    candidates = [
+        os.path.join(root, exe_name),
+        os.path.join(root, "ffmpeg", exe_name),
+    ]
+    if hasattr(sys, "_MEIPASS"):
+        candidates.append(os.path.join(sys._MEIPASS, exe_name))
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return shutil.which("yt-dlp") or ""
 
 
 def get_opencv_status() -> dict:
-    """
-    检测 opencv-python 是否已安装且功能完整（含 CascadeClassifier）。
-    使用子进程检测，避免同一进程内 import 缓存导致的误报。
-    """
-    ver = _run_check(
-        "import cv2; _ = cv2.CascadeClassifier; print(cv2.__version__)"
-    )
-    return {"installed": bool(ver), "version": ver}
+    """检测 opencv-python 是否已安装且功能完整（含 CascadeClassifier）。"""
+    try:
+        import cv2
+        _ = cv2.CascadeClassifier
+        ver = getattr(cv2, "__version__", "installed")
+        return {"installed": True, "version": str(ver)}
+    except Exception:
+        return {"installed": False, "version": ""}
 
 
 def get_ytdlp_status() -> dict:
-    """
-    检测 yt-dlp 是否已安装。
-    使用子进程检测，避免 import 缓存问题。
-    """
-    ver = _run_check("import yt_dlp; print(yt_dlp.version.__version__)")
-    return {"installed": bool(ver), "version": ver}
+    """检测 yt-dlp.exe（或 Python 模块 yt_dlp）是否已安装。"""
+    exe = get_ytdlp_exe()
+    if exe and os.path.isfile(exe):
+        ver = "已就绪"
+        try:
+            r = subprocess.run(
+                [exe, "--version"],
+                capture_output=True, text=True, timeout=6,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                ver = r.stdout.strip()
+        except Exception:
+            pass
+        return {"installed": True, "version": ver, "path": exe}
+    if not getattr(sys, "frozen", False):
+        try:
+            import yt_dlp
+            ver = getattr(yt_dlp.version, "__version__", "installed")
+            return {"installed": True, "version": str(ver), "path": "python -m yt_dlp"}
+        except Exception:
+            pass
+    target = os.path.join(_get_install_root(), "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")
+    return {"installed": False, "version": "", "path": target}
 
 
 def get_mediapipe_status() -> dict:
-    """
-    检测 mediapipe 是否已安装（用于人脸检测）。
-    使用子进程检测，避免 import 缓存问题。
-    """
-    ver = _run_check("import mediapipe as mp; print(mp.__version__)")
-    return {"installed": bool(ver), "version": ver}
+    """检测 mediapipe 是否已安装（用于人脸检测）。"""
+    try:
+        import mediapipe as mp
+        ver = getattr(mp, "__version__", "installed")
+        return {"installed": True, "version": str(ver)}
+    except Exception:
+        return {"installed": False, "version": ""}
 
 
 def get_face_detection_status() -> dict:
@@ -217,60 +240,94 @@ class DownloadThread(QThread):
                     pass
 
 
-# ── 通用 pip 安装线程 ─────────────────────────────────────────────────────────
+# ── yt-dlp 独立可执行文件下载线程 ────────────────────────────────────────────
 
-class PipInstallThread(QThread):
-    """通用 pip 安装线程，可安装任意 Python 包。支持先卸载冲突包。"""
+_YTDLP_URLS = [
+    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+    "https://ghfast.top/https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe",
+]
+
+
+class YtdlpDownloadThread(QThread):
+    """下载官方独立版 yt-dlp.exe 到软件根目录，无需依赖系统 Python/pip。"""
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, package: str, display_name: str, pre_uninstall: list = None, parent=None):
+    def __init__(self, target_path: str = "", parent=None):
         super().__init__(parent)
-        self.package       = package        # pip 包名，如 "opencv-python"
-        self.display_name  = display_name   # 显示名称
-        self.pre_uninstall = pre_uninstall or []  # 安装前先卸载的冲突包列表
+        self.target_path = target_path or os.path.join(
+            _get_install_root(), "yt-dlp.exe" if sys.platform == "win32" else "yt-dlp"
+        )
+        self._stop = False
+
+    def stop(self):
+        self._stop = True
 
     def run(self):
-        # ── Step 1: 先卸载冲突包 ─────────────────────────────────────────
-        if self.pre_uninstall:
-            self.progress.emit(5, f"正在卸载冲突包：{', '.join(self.pre_uninstall)}...")
-            try:
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "uninstall", "-y"] + self.pre_uninstall,
-                    capture_output=True, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                )
-            except Exception:
-                pass  # 卸载失败不影响后续安装
-
-        # ── Step 2: 安装目标包 ────────────────────────────────────────────
-        self.progress.emit(10, f"正在安装 {self.display_name}，请稍候...")
+        part_path = self.target_path + ".part"
         try:
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "pip", "install", "--upgrade",
-                 "--force-reinstall", self.package],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-            )
-            output_lines = []
-            for line in proc.stdout:
-                line = line.strip()
-                if line:
-                    output_lines.append(line)
-                    self.progress.emit(50, line[:100])
-            proc.wait()
-            if proc.returncode == 0:
-                self.progress.emit(100, "安装成功！")
-                self.finished.emit(True, f"{self.display_name} 已成功安装！")
-            else:
-                err = "\n".join(output_lines[-5:])
-                self.finished.emit(False, f"安装失败（pip 返回非零退出码）：\n{err}")
+            os.makedirs(os.path.dirname(self.target_path), exist_ok=True)
+            resp = None
+            for idx, url in enumerate(_YTDLP_URLS):
+                if self._stop:
+                    self.finished.emit(False, "用户已取消下载。")
+                    return
+                src_name = "GitHub 官方源" if idx == 0 else "备用加速源"
+                self.progress.emit(2, f"正在连接 {src_name} 下载 yt-dlp.exe...")
+                try:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "Mozilla/5.0 VideoTools/1.5"}
+                    )
+                    ctx = ssl.create_default_context()
+                    resp = urllib.request.urlopen(req, timeout=30, context=ctx)
+                    break
+                except Exception:
+                    continue
+
+            if resp is None:
+                self.finished.emit(False, "无法连接到 GitHub 下载 yt-dlp.exe，请检查网络连接后重试。")
+                return
+
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            with open(part_path, "wb") as f:
+                while True:
+                    if self._stop:
+                        self.finished.emit(False, "用户已取消下载。")
+                        return
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    mb = downloaded / (1024 * 1024)
+                    if total > 0:
+                        pct = min(95, max(5, int(downloaded * 95 / total)))
+                        total_mb = total / (1024 * 1024)
+                        self.progress.emit(pct, f"正在下载 yt-dlp.exe... {mb:.1f} / {total_mb:.1f} MB")
+                    else:
+                        self.progress.emit(50, f"正在下载 yt-dlp.exe... {mb:.1f} MB")
+
+            if not os.path.isfile(part_path) or os.path.getsize(part_path) < 1024 * 1024:
+                self.finished.emit(False, "下载的 yt-dlp.exe 文件不完整，请重试。")
+                return
+
+            if os.path.exists(self.target_path):
+                try:
+                    os.remove(self.target_path)
+                except Exception:
+                    pass
+            os.replace(part_path, self.target_path)
+            self.progress.emit(100, "安装成功！")
+            self.finished.emit(True, f"yt-dlp 已成功安装到：\n{self.target_path}")
         except Exception as e:
-            self.finished.emit(False, f"安装过程中发生错误：\n{e}")
+            self.finished.emit(False, f"下载安装 yt-dlp 时出错：\n{e}")
+        finally:
+            if os.path.exists(part_path):
+                try:
+                    os.remove(part_path)
+                except Exception:
+                    pass
 
 
 # ── 主对话框：下载必要组件 ────────────────────────────────────────────────────
@@ -495,13 +552,13 @@ class FFmpegDownloaderDialog(QDialog):
             self.lbl_yt_icon.setText("✅")
             self.lbl_yt_text.setText(f"yt-dlp 已安装  (v{status['version']})")
             self.lbl_yt_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #10b981;")
-            self.lbl_yt_path.setText("视频下载 / 链接截图 / 云盘下载功能可用")
-            self.btn_ytdlp_install.setText("🔄  更新 yt-dlp（pip upgrade）")
+            self.lbl_yt_path.setText(f"路径：{status.get('path', '')}")
+            self.btn_ytdlp_install.setText("🔄  重新下载 / 更新 yt-dlp")
         else:
             self.lbl_yt_icon.setText("❌")
             self.lbl_yt_text.setText("未安装 yt-dlp — 下载功能不可用")
             self.lbl_yt_text.setStyleSheet("font-size: 10pt; font-weight: bold; color: #f87171;")
-            self.lbl_yt_path.setText("YouTube下载 / 链接截图 / 云盘下载功能需要此组件")
+            self.lbl_yt_path.setText(f"将安装到：{status.get('path', '')}")
             self.btn_ytdlp_install.setText("⬇️  安装 yt-dlp")
 
     # ── FFmpeg 下载 ───────────────────────────────────────────────────────────
@@ -541,7 +598,7 @@ class FFmpegDownloaderDialog(QDialog):
         self.btn_close.setEnabled(False)
         self.prog_yt.setVisible(True)
         self.prog_yt.setValue(0)
-        self._ytdlp_thread = PipInstallThread("yt-dlp", "yt-dlp", parent=self)
+        self._ytdlp_thread = YtdlpDownloadThread(parent=self)
         self._ytdlp_thread.progress.connect(self._on_yt_progress)
         self._ytdlp_thread.finished.connect(self._on_yt_finished)
         self._ytdlp_thread.start()
