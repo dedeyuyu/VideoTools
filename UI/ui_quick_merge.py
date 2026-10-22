@@ -3,13 +3,18 @@
 ui_quick_merge.py — 快速合并界面
 
 功能特点：
-1. 支持选择 2 ~ 5 个视频板块（视频1 ~ 视频5），直接拖拽视频文件或文件夹导入。
-2. 支持按「名称相似度（可设阈值 %）」或「文件名开头数字」或「列表顺序」自动匹配。
-3. 数量不对齐也可正常合成：匹配成功的按 视频1 -> 视频2 -> ... 顺序首尾拼接；
-   未找到匹配的直接单独输出一个视频。
+1. 支持选择 1 ~ 5 个视频板块：
+   - 1 个板块（单板块模式）：将所有视频一股脑拖入同一个板块，按名称相似度（可设阈值 %）
+     或文件名开头数字自动归类成组，同组视频合并到一起，未匹配的单独输出。
+   - 2 ~ 5 个板块（多板块模式）：跨板块按相似度、开头数字或列表顺序配对合并。
+2. 支持选择合并顺序：「按顺序合并」或「随机顺序合并」。
+3. 支持设置「输出数量」（每组输出几份）：
+   - 设为 1 时正常输出 1 轮；
+   - 设为 2（或更多）时，第一组合并完后会对多段匹配组再进行第二组（及更多组）合并；
+     若选择了「随机顺序合并」，每一轮合并都会重新随机打乱顺序，确保每组顺序不同。
 4. 支持保留原声 / 去除声音（含单板块独立静音）、播放倍速、转场效果与转场时长、
    多种画面尺寸比例（9:16、16:9、3:4、4:3、4:5、1:1、19:6）。
-5. 输出文件名自动保留视频1（主板块）的原始命名。
+5. 输出文件名自动保留主视频的原始命名（多轮输出自动追加 _2、_3 防止覆盖）。
 """
 import os
 import sys
@@ -210,39 +215,41 @@ class QuickMergeUI(QWidget):
         root.setContentsMargins(6, 4, 10, 12)
         root.setSpacing(10)
 
-        # ── 顶部标题与板块数量/匹配规则栏 ────────────────────────────────
+        # ── 顶部标题栏 ────────────────────────────────────────────────────
         header_row = QHBoxLayout()
         title_lbl = QLabel("⚡ 快速合并")
         title_lbl.setStyleSheet("font-size: 20px; font-weight: bold; color: #3182CE;")
         header_row.addWidget(title_lbl)
         header_row.addSpacing(12)
-        sub_lbl = QLabel("多板块按名称相似度或开头数字自动配对，首尾顺序拼接为一个视频（未匹配视频自动单段输出，保留原视频命名）")
+        sub_lbl = QLabel("支持单板块自动归类合并或 2~5 板块配对合并，可选顺序/随机合并与多组循环输出")
         sub_lbl.setStyleSheet("color: #718096; font-size: 9.5pt;")
         header_row.addWidget(sub_lbl, 1)
         root.addLayout(header_row)
 
-        # ── 卡片 1：匹配模式与多视频板块 ──────────────────────────────────
+        # ── 卡片 1：板块模式、匹配规则与视频列表 ──────────────────────────
         top_card, top_lay, _ = self._make_card()
 
-        ctrl_row = QHBoxLayout()
-        ctrl_row.setSpacing(10)
-        ctrl_row.addWidget(QLabel("🧩 视频板块数量:"))
+        # 第一行：板块数量 + 匹配方式 + 相似度阈值
+        ctrl_row1 = QHBoxLayout()
+        ctrl_row1.setSpacing(10)
+        ctrl_row1.addWidget(QLabel("🧩 视频板块数量:"))
         self.cmb_slot_count = QComboBox()
+        self.cmb_slot_count.addItem("1 个板块（单板块自动归类合并）", 1)
         for n in (2, 3, 4, 5):
             self.cmb_slot_count.addItem(f"{n} 个板块（视频1 ~ 视频{n}）", n)
-        self.cmb_slot_count.setMinimumWidth(175)
+        self.cmb_slot_count.setMinimumWidth(210)
         self.cmb_slot_count.currentIndexChanged.connect(self._on_slot_count_changed)
-        ctrl_row.addWidget(self.cmb_slot_count)
+        ctrl_row1.addWidget(self.cmb_slot_count)
 
-        ctrl_row.addSpacing(12)
-        ctrl_row.addWidget(QLabel("🔗 匹配方式:"))
+        ctrl_row1.addSpacing(8)
+        ctrl_row1.addWidget(QLabel("🔗 匹配方式:"))
         self.cmb_match_mode = QComboBox()
         self.cmb_match_mode.addItem("按名称相似度匹配", "similarity")
         self.cmb_match_mode.addItem("按文件名开头数字匹配", "number")
         self.cmb_match_mode.addItem("按列表顺序依次匹配", "order")
-        self.cmb_match_mode.setMinimumWidth(175)
+        self.cmb_match_mode.setMinimumWidth(165)
         self.cmb_match_mode.currentIndexChanged.connect(self._on_match_mode_changed)
-        ctrl_row.addWidget(self.cmb_match_mode)
+        ctrl_row1.addWidget(self.cmb_match_mode)
 
         # 相似度阈值控件组（仅在“按名称相似度匹配”时显示）
         self.sim_widget = QWidget()
@@ -253,18 +260,65 @@ class QuickMergeUI(QWidget):
         self.slider_sim = QSlider(Qt.Orientation.Horizontal)
         self.slider_sim.setRange(10, 100)
         self.slider_sim.setValue(60)
-        self.slider_sim.setFixedWidth(110)
+        self.slider_sim.setFixedWidth(105)
         self.spin_sim = QSpinBox()
         self.spin_sim.setRange(10, 100)
         self.spin_sim.setValue(60)
         self.spin_sim.setSuffix(" %")
-        self.spin_sim.setFixedWidth(72)
+        self.spin_sim.setFixedWidth(70)
         self.slider_sim.valueChanged.connect(self.spin_sim.setValue)
         self.spin_sim.valueChanged.connect(self.slider_sim.setValue)
         self.spin_sim.valueChanged.connect(self._on_params_changed)
         sim_lay.addWidget(self.slider_sim)
         sim_lay.addWidget(self.spin_sim)
-        ctrl_row.addWidget(self.sim_widget)
+        ctrl_row1.addWidget(self.sim_widget)
+
+        ctrl_row1.addStretch()
+        btn_clear_all = QPushButton("🗑️ 清空全部板块")
+        btn_clear_all.clicked.connect(self._clear_all_slots)
+        ctrl_row1.addWidget(btn_clear_all)
+        top_lay.addLayout(ctrl_row1)
+
+        # 第二行：合并顺序（按顺序 / 随机） + 输出数量（每组输出几轮） + 未匹配策略
+        ctrl_row2 = QHBoxLayout()
+        ctrl_row2.setSpacing(10)
+        ctrl_row2.addWidget(QLabel("🔀 合并顺序:"))
+        self.cmb_merge_order = QComboBox()
+        self.cmb_merge_order.addItem("按顺序合并", "sequential")
+        self.cmb_merge_order.addItem("随机顺序合并", "random")
+        self.cmb_merge_order.setMinimumWidth(140)
+        self.cmb_merge_order.setToolTip(
+            "按顺序合并：同一组匹配到的视频按列表先后顺序依次拼接\n"
+            "随机顺序合并：同一组匹配到的视频在合并时随机打乱顺序拼接"
+        )
+        self.cmb_merge_order.currentIndexChanged.connect(self._on_merge_order_changed)
+        ctrl_row2.addWidget(self.cmb_merge_order)
+
+        self.btn_reshuffle = QPushButton("🎲 重新随机排序")
+        self.btn_reshuffle.setToolTip("重新随机生成每组视频的拼接顺序")
+        self.btn_reshuffle.clicked.connect(self._recompute_matches)
+        self.btn_reshuffle.setVisible(False)
+        ctrl_row2.addWidget(self.btn_reshuffle)
+
+        ctrl_row2.addSpacing(12)
+        ctrl_row2.addWidget(QLabel("🔢 输出数量:"))
+        self.spin_output_count = QSpinBox()
+        self.spin_output_count.setRange(1, 50)
+        self.spin_output_count.setValue(1)
+        self.spin_output_count.setSuffix(" 组")
+        self.spin_output_count.setFixedWidth(80)
+        self.spin_output_count.setToolTip(
+            "设置每组匹配视频输出几个成品：\n"
+            "• 设为 1：正常输出 1 轮（包括多段合并组与未匹配单段视频）\n"
+            "• 设为 2 或更多：第一组合并完后，所有多段匹配组会继续进行第二组（及更多组）合并；\n"
+            "  若选择了「随机顺序合并」，第二组会重新随机打乱顺序后再合并！"
+        )
+        self.spin_output_count.valueChanged.connect(self._on_params_changed)
+        ctrl_row2.addWidget(self.spin_output_count)
+
+        self.lbl_output_count_hint = QLabel("（设为 2+ 时，匹配组完成第 1 轮后会自动重新随机/顺序合并第 2 轮）")
+        self.lbl_output_count_hint.setStyleSheet("color: #718096; font-size: 9pt;")
+        ctrl_row2.addWidget(self.lbl_output_count_hint)
 
         self.chk_other_unmatched = QCheckBox("其他板块未匹配视频也单独输出")
         self.chk_other_unmatched.setToolTip(
@@ -272,15 +326,12 @@ class QuickMergeUI(QWidget):
             "勾选后，视频 2~5 中未被匹配到的多余视频也会各自单独输出。"
         )
         self.chk_other_unmatched.toggled.connect(self._on_params_changed)
-        ctrl_row.addWidget(self.chk_other_unmatched)
+        ctrl_row2.addWidget(self.chk_other_unmatched)
 
-        ctrl_row.addStretch()
-        btn_clear_all = QPushButton("🗑️ 清空全部板块")
-        btn_clear_all.clicked.connect(self._clear_all_slots)
-        ctrl_row.addWidget(btn_clear_all)
-        top_lay.addLayout(ctrl_row)
+        ctrl_row2.addStretch()
+        top_lay.addLayout(ctrl_row2)
 
-        # 2 ~ 5 个视频板块横向并排
+        # 1 ~ 5 个视频板块横向并排
         slots_row = QHBoxLayout()
         slots_row.setSpacing(10)
         for idx in range(self.MAX_SLOTS):
@@ -539,13 +590,27 @@ class QuickMergeUI(QWidget):
         return int(self.cmb_slot_count.currentData() or 2)
 
     def _on_slot_count_changed(self):
+        cnt = self._active_slot_count()
+        if cnt == 1 and self.cmb_match_mode.currentData() == "order":
+            self.cmb_match_mode.setCurrentIndex(0)
         self._refresh_slot_visibility()
         self._recompute_matches()
         self.save_settings()
 
     def _on_match_mode_changed(self):
         mode = self.cmb_match_mode.currentData()
+        if self._active_slot_count() == 1 and mode == "order":
+            self.cmb_match_mode.blockSignals(True)
+            self.cmb_match_mode.setCurrentIndex(0)
+            self.cmb_match_mode.blockSignals(False)
+            mode = "similarity"
         self.sim_widget.setVisible(mode == "similarity")
+        self._recompute_matches()
+        self.save_settings()
+
+    def _on_merge_order_changed(self):
+        is_rand = (self.cmb_merge_order.currentData() == "random")
+        self.btn_reshuffle.setVisible(is_rand)
         self._recompute_matches()
         self.save_settings()
 
@@ -571,13 +636,18 @@ class QuickMergeUI(QWidget):
         cnt = self._active_slot_count()
         for i, card in enumerate(self.slot_cards):
             card.setVisible(i < cnt)
+        self.chk_other_unmatched.setVisible(cnt > 1)
         self._update_slot_headers()
 
     def _update_slot_headers(self):
+        cnt = self._active_slot_count()
         for i, lbl in enumerate(self.slot_title_labels):
             n = self.slot_lists[i].count()
-            suffix = "（主命名基准）" if i == 0 else ""
-            lbl.setText(f"🎬 视频 {i + 1}{suffix}  [{n} 个]")
+            if cnt == 1 and i == 0:
+                lbl.setText(f"🎬 全部视频列表（可直接拖入所有视频，自动按相似度/开头数字归类合并）  [{n} 个]")
+            else:
+                suffix = "（主命名基准）" if i == 0 else ""
+                lbl.setText(f"🎬 视频 {i + 1}{suffix}  [{n} 个]")
 
     def _recompute_matches(self):
         if self._loading:
@@ -587,12 +657,16 @@ class QuickMergeUI(QWidget):
         mode = self.cmb_match_mode.currentData() or "similarity"
         sim_thresh = self.spin_sim.value() / 100.0
         inc_other = self.chk_other_unmatched.isChecked()
+        merge_order = self.cmb_merge_order.currentData() or "sequential"
+        out_count = self.spin_output_count.value()
 
         self.matched_groups = match_video_groups(
             active_lists,
             match_mode=mode,
             similarity_threshold=sim_thresh,
             include_other_unmatched=inc_other,
+            merge_order=merge_order,
+            output_count=out_count,
         )
 
         self.table_preview.setRowCount(len(self.matched_groups))
@@ -603,14 +677,17 @@ class QuickMergeUI(QWidget):
                 single_cnt += 1
             else:
                 multi_cnt += 1
-            chain_str = "  ➔  ".join(
-                f"[视频{s + 1}] {os.path.basename(p)}" for s, p in g["clips"]
-            )
+            if cnt == 1:
+                chain_str = "  ➔  ".join(os.path.basename(p) for _, p in g["clips"])
+            else:
+                chain_str = "  ➔  ".join(
+                    f"[视频{s + 1}] {os.path.basename(p)}" for s, p in g["clips"]
+                )
             it_idx = QTableWidgetItem(str(r + 1))
             it_idx.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             it_info = QTableWidgetItem(g["match_info"])
             it_chain = QTableWidgetItem(chain_str)
-            it_chain.setToolTip("\n".join(f"视频{s + 1}: {p}" for s, p in g["clips"]))
+            it_chain.setToolTip("\n".join(f"{idx + 1}. {p}" for idx, (_, p) in enumerate(g["clips"])))
             it_out = QTableWidgetItem(g["output_name"])
             it_status = QTableWidgetItem("待处理")
             it_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -628,11 +705,12 @@ class QuickMergeUI(QWidget):
 
         total = len(self.matched_groups)
         if total == 0:
-            self.lbl_match_summary.setText("请将视频拖入上方「视频 1 ~ 视频 N」板块")
+            self.lbl_match_summary.setText("请将视频拖入上方视频板块")
             self.lbl_match_summary.setStyleSheet("color: #718096;")
         else:
+            order_tag = "随机顺序" if merge_order == "random" else "按顺序"
             self.lbl_match_summary.setText(
-                f"📊 共 {total} 个输出任务（{multi_cnt} 组多段合并，{single_cnt} 个未匹配单段输出）"
+                f"📊 共 {total} 个输出任务（{multi_cnt} 组多段{order_tag}合并，{single_cnt} 个未匹配单段输出）"
             )
             self.lbl_match_summary.setStyleSheet("color: #38A169; font-weight: bold;")
 
@@ -657,9 +735,10 @@ class QuickMergeUI(QWidget):
             self.btn_start.setText("正在停止...")
             return
 
-        self._recompute_matches()
         if not self.matched_groups:
-            QMessageBox.warning(self, "没有可合并的视频", "请先在「视频 1」等板块中导入视频文件！")
+            self._recompute_matches()
+        if not self.matched_groups:
+            QMessageBox.warning(self, "没有可合并的视频", "请先在视频板块中导入视频文件！")
             return
 
         ff_status = get_ffmpeg_status()
@@ -731,7 +810,7 @@ class QuickMergeUI(QWidget):
     def _load_settings(self):
         self._loading = True
         try:
-            slot_cnt = self.settings.value("qm_slot_count", 2, type=int)
+            slot_cnt = self.settings.value("qm_slot_count", 1, type=int)
             idx_cnt = self.cmb_slot_count.findData(slot_cnt)
             if idx_cnt >= 0:
                 self.cmb_slot_count.setCurrentIndex(idx_cnt)
@@ -745,6 +824,15 @@ class QuickMergeUI(QWidget):
             sim_val = self.settings.value("qm_sim_threshold", 60, type=int)
             self.spin_sim.setValue(sim_val)
             self.slider_sim.setValue(sim_val)
+
+            merge_order = self.settings.value("qm_merge_order", "sequential")
+            idx_ord = self.cmb_merge_order.findData(merge_order)
+            if idx_ord >= 0:
+                self.cmb_merge_order.setCurrentIndex(idx_ord)
+            self.btn_reshuffle.setVisible(merge_order == "random")
+
+            out_cnt = self.settings.value("qm_output_count", 1, type=int)
+            self.spin_output_count.setValue(max(1, out_cnt))
 
             self.chk_other_unmatched.setChecked(
                 self.settings.value("qm_other_unmatched", False, type=bool)
@@ -804,6 +892,8 @@ class QuickMergeUI(QWidget):
         self.settings.setValue("qm_slot_count", self._active_slot_count())
         self.settings.setValue("qm_match_mode", self.cmb_match_mode.currentData())
         self.settings.setValue("qm_sim_threshold", self.spin_sim.value())
+        self.settings.setValue("qm_merge_order", self.cmb_merge_order.currentData())
+        self.settings.setValue("qm_output_count", self.spin_output_count.value())
         self.settings.setValue("qm_other_unmatched", self.chk_other_unmatched.isChecked())
         self.settings.setValue("qm_mute_global", self.rb_mute_audio.isChecked())
         self.settings.setValue("qm_aspect_ratio", self.cmb_aspect.currentData())

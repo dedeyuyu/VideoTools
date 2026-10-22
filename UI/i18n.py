@@ -102,9 +102,12 @@ MANUAL = {
     "❌ 下载未完成: {0}": "❌ Download incomplete: {0}",
     "启动安装失败": "Failed to Launch Installer",
     "⚡ 快速合并": "⚡ Quick Merge",
+    "支持单板块自动归类合并或 2~5 板块配对合并，可选顺序/随机合并与多组循环输出":
+        "Auto-group videos in 1 slot or match across 2~5 slots, with sequential/random order and multi-batch output",
     "多板块按名称相似度或开头数字自动配对，首尾顺序拼接为一个视频（未匹配视频自动单段输出，保留原视频命名）":
         "Auto-match videos across slots by name similarity or leading number and concatenate sequentially (unmatched videos output individually, keeping original name)",
     "🧩 视频板块数量:": "🧩 Video Slots:",
+    "1 个板块（单板块自动归类合并）": "1 Slot (Auto-group & Merge)",
     "{0} 个板块（视频1 ~ 视频{1}）": "{0} Slots (Video 1 ~ Video {1})",
     "2 个板块（视频1 ~ 视频2）": "2 Slots (Video 1 ~ Video 2)",
     "3 个板块（视频1 ~ 视频3）": "3 Slots (Video 1 ~ Video 3)",
@@ -115,9 +118,18 @@ MANUAL = {
     "按文件名开头数字匹配": "Match by Leading Number",
     "按列表顺序依次匹配": "Match by List Order",
     "相似度阈值 ≥": "Similarity ≥",
+    "🔀 合并顺序:": "🔀 Merge Order:",
+    "按顺序合并": "Sequential Order",
+    "随机顺序合并": "Random Order",
+    "🎲 重新随机排序": "🎲 Reshuffle Order",
+    "🔢 输出数量:": "🔢 Output Batches:",
+    "（设为 2+ 时，匹配组完成第 1 轮后会自动重新随机/顺序合并第 2 轮）":
+        "(When set to 2+, matched groups will be merged again in round 2+ with a fresh random/sequential order)",
     "其他板块未匹配视频也单独输出": "Also output unmatched videos from other slots",
     "🗑️ 清空全部板块": "🗑️ Clear All Slots",
     "静音此板块": "Mute this slot",
+    "🎬 全部视频列表（可直接拖入所有视频，自动按相似度/开头数字归类合并）  [{0} 个]":
+        "🎬 All Videos (Drop all videos here to auto-group by similarity or leading number)  [{0}]",
     "🎬 视频 {0}（主命名基准）  [{1} 个]": "🎬 Video {0} (Primary Name)  [{1}]",
     "🎬 视频 {0}  [{1} 个]": "🎬 Video {0}  [{1}]",
     "📋 匹配与拼接顺序预览": "📋 Match & Concatenation Preview",
@@ -125,7 +137,10 @@ MANUAL = {
     "拼接顺序（播放完前一段紧接着播放下一段）": "Concatenation Order (Sequential)",
     "输出文件名（保留原命名）": "Output Filename (Original Name)",
     "状态": "Status",
+    "请将视频拖入上方视频板块": "Drag videos into the video slot(s) above",
     "请将视频拖入上方「视频 1 ~ 视频 N」板块": "Drag videos into 'Video 1 ~ Video N' slots above",
+    "📊 共 {0} 个输出任务（{1} 组多段{2}合并，{3} 个未匹配单段输出）":
+        "📊 {0} output tasks ({1} multi-clip {2} merges, {3} single-clip outputs)",
     "📊 共 {0} 个输出任务（{1} 组多段合并，{2} 个未匹配单段输出）":
         "📊 {0} output tasks ({1} multi-clip merges, {2} single-clip outputs)",
     "⚙️ 合并参数设置": "⚙️ Merge Settings",

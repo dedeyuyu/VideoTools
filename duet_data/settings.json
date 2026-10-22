@@ -1,8 +1,10 @@
 {
-  "active_tpl": "多格·上1 / 下3",
+  "active_tpl": "多格·上1 / 下4",
   "cache_root": "D:/合拍视频-批量合成",
-  "last_project": "D:/合拍视频-批量合成\\2026-10-12_合拍视频批量合成",
+  "last_project": "D:/合拍视频-批量合成\\2026-10-15_合拍视频批量合成_02",
   "layout_presets_v1": true,
+  "layout_presets_v2": true,
+  "layout_presets_v3": true,
   "export_dir": "C:/Users/DYcomputer/Downloads",
   "res_idx": 0,
   "quality_idx": 1,
@@ -10,7 +12,7 @@
   "workers": 4,
   "volume": 100,
   "global_speed": 1.0,
-  "max_3min": false,
+  "max_3min": true,
   "mute_person": true,
   "mute_viral": false
 }

@@ -205,8 +205,19 @@ def extract_frame_png(path: str, t: float = 0.0) -> bytes:
         res = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW, timeout=30)
         if res.returncode == 0 and res.stdout:
             return res.stdout
-        # 超出时长时退回第 0 秒
+        # 超出时长时优先按原视频时长取模循环，再退回第 0 秒
         if t > 0:
+            dur = probe_info(path).get("duration", 0.0)
+            if dur > 0.1 and t >= dur:
+                t_mod = t % dur
+                res2 = subprocess.run(
+                    [get_ffmpeg(), "-hide_banner", "-loglevel", "error",
+                     "-ss", f"{max(0.0, t_mod):.3f}", "-i", path,
+                     "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
+                    capture_output=True, creationflags=_NO_WINDOW, timeout=30
+                )
+                if res2.returncode == 0 and res2.stdout:
+                    return res2.stdout
             return extract_frame_png(path, 0.0)
     except Exception:
         pass
@@ -374,15 +385,80 @@ def task_source(task: dict, src: str):
     if src == "viral":
         return task.get("viral"), task.get("v_w", 0), task.get("v_h", 0), bool(task.get("v_audio"))
     if src == "person":
-        return task.get("cache"), task.get("p_w", 0), task.get("p_h", 0), bool(task.get("p_audio"))
+        p = task.get("cache") or task.get("person")
+        if not p:
+            return None
+        return p, task.get("p_w", 0), task.get("p_h", 0), bool(task.get("p_audio"))
     try:
         k = int(src.replace("person", "")) - 2
     except ValueError:
         return None
     ex = task.get("extra") or []
-    if 0 <= k < len(ex) and ex[k].get("cache"):
+    if 0 <= k < len(ex) and (ex[k].get("cache") or ex[k].get("person")):
         e = ex[k]
-        return e["cache"], e.get("w", 0), e.get("h", 0), bool(e.get("audio"))
+        return e.get("cache") or e.get("person"), e.get("w", 0), e.get("h", 0), bool(e.get("audio"))
+    return None
+
+
+def task_source_meta(task: dict, src: str):
+    """返回该视频源的完整元数据 dict，用于导出时动态循环对齐与变速。"""
+    if src == "viral":
+        p = task.get("viral")
+        if not p:
+            return None
+        return {
+            "path": p,
+            "w": task.get("v_w", 0),
+            "h": task.get("v_h", 0),
+            "audio": bool(task.get("v_audio")),
+            "raw_audio": bool(task.get("v_audio")),
+            "dur": float(task.get("v_dur") or task.get("duration") or 0),
+            "need_loop_align": False,
+        }
+    if src == "person":
+        raw_p = task.get("person")
+        cache_p = task.get("cache") or raw_p
+        if not cache_p:
+            return None
+        is_pre_aligned = bool(
+            cache_p and raw_p
+            and os.path.normcase(os.path.abspath(cache_p)) != os.path.normcase(os.path.abspath(raw_p))
+        )
+        skip_align = bool(task.get("skip_align", False))
+        return {
+            "path": cache_p,
+            "raw_path": raw_p or cache_p,
+            "w": task.get("p_w", 0),
+            "h": task.get("p_h", 0),
+            "audio": bool(task.get("p_audio")),
+            "raw_audio": bool(task.get("p_raw_audio", task.get("p_audio", False))),
+            "dur": float(task.get("p_dur") or 0),
+            "need_loop_align": (not is_pre_aligned) and (not skip_align),
+        }
+    try:
+        k = int(src.replace("person", "")) - 2
+    except ValueError:
+        return None
+    ex = task.get("extra") or []
+    if 0 <= k < len(ex) and (ex[k].get("cache") or ex[k].get("person")):
+        e = ex[k]
+        raw_p = e.get("person")
+        cache_p = e.get("cache") or raw_p
+        is_pre_aligned = bool(
+            cache_p and raw_p
+            and os.path.normcase(os.path.abspath(cache_p)) != os.path.normcase(os.path.abspath(raw_p))
+        )
+        skip_align = bool(task.get("skip_align", False))
+        return {
+            "path": cache_p,
+            "raw_path": raw_p or cache_p,
+            "w": e.get("w", 0),
+            "h": e.get("h", 0),
+            "audio": bool(e.get("audio")),
+            "raw_audio": bool(e.get("raw_audio", e.get("audio", False))),
+            "dur": float(e.get("dur") or 0),
+            "need_loop_align": (not is_pre_aligned) and (not skip_align),
+        }
     return None
 
 
@@ -412,22 +488,35 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
                      phone_png: str = "", phone_start: float = 0.0,
                      wm_png: str = "", global_speed: float = 1.0, max_3min: bool = False,
                      mute_viral: bool = False, volume: float = 1.0,
+                     person_speed: float = None, mute_person: bool = None,
                      out_w: int = 1080, out_h: int = 1920,
                      quality: int = 23, enc_key: str = "cpu") -> list:
-    """task 需包含：cache, viral, duration, p_w, p_h, v_w, v_h, p_audio, v_audio, adj（可选 extra）"""
+    """task 需包含：cache/person, viral, duration, p_w, p_h, v_w, v_h, p_audio, v_audio, adj（可选 extra）"""
     D = float(task["duration"])
     adj = task.get("adj", {}) or {}
+    p_speed = max(0.1, float(person_speed if person_speed is not None else task.get("person_speed", 1.0)))
+    p_mute = bool(mute_person if mute_person is not None else task.get("mute_person", True))
     cells = [(i, cl) for i, cl in ordered_cells(tpl) if task_source(task, cl.get("src"))]
 
     cmd = [get_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error"]
-    src_idx, src_info = {}, {}
+    src_idx, src_info, src_meta = {}, {}, {}
     for _, cl in cells:
         sname = cl["src"]
         if sname not in src_idx:
-            info = task_source(task, sname)
+            meta = task_source_meta(task, sname)
             src_idx[sname] = len(src_idx)
-            src_info[sname] = info
-            cmd += ["-i", info[0]]
+            src_info[sname] = (meta["path"], meta["w"], meta["h"], meta["audio"])
+            src_meta[sname] = meta
+            if meta["need_loop_align"]:
+                p_dur = meta["dur"]
+                if p_dur <= 0:
+                    p_dur = probe_info(meta["path"]).get("duration", 0)
+                    meta["dur"] = p_dur
+                eff_dur = (p_dur / p_speed) if p_dur > 0 else D
+                loops = max(1, math.ceil(D / eff_dur)) if eff_dur > 0 else 1
+                if loops > 1:
+                    cmd += ["-stream_loop", str(loops - 1)]
+            cmd += ["-i", meta["path"]]
     idx = len(src_idx)
     title_idx = phone_idx = None
     if title_png and os.path.isfile(title_png):
@@ -446,15 +535,24 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
         idx += 1
 
     fc = [f"color=c=black:s={CANVAS_W}x{CANVAS_H}:r=30:d={D:.3f}[base]"]
-    # 同一路视频用在多个格子里时需要 split
+    # 同一路视频用在多个格子里时需要 split；人物视频仅标记对齐时在此统一完成变速与循环裁切
     labels = {}
     for sname, si in src_idx.items():
+        meta = src_meta[sname]
+        base_v = f"{si}:v"
+        if meta["need_loop_align"]:
+            vf_parts = []
+            if abs(p_speed - 1.0) > 1e-3:
+                vf_parts.append(f"setpts=PTS/{p_speed:.4f}")
+            vf_parts.append(f"trim=duration={D:.3f},setpts=PTS-STARTPTS")
+            base_v = f"palign_v{si}"
+            fc.append(f"[{si}:v]{','.join(vf_parts)}[{base_v}]")
         n = sum(1 for _, cl in cells if cl["src"] == sname)
         if n == 1:
-            labels[sname] = [f"{si}:v"]
+            labels[sname] = [base_v]
         else:
             outs = [f"src{si}_{j}" for j in range(n)]
-            fc.append(f"[{si}:v]split={n}" + "".join(f"[{o}]" for o in outs))
+            fc.append(f"[{base_v}]split={n}" + "".join(f"[{o}]" for o in outs))
             labels[sname] = outs
     last = "base"
     for k, (ci, cl) in enumerate(cells):
@@ -486,9 +584,22 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
     audio_srcs = []
     if "viral" in src_idx and src_info["viral"][3] and not mute_viral:
         audio_srcs.append(f"[{src_idx['viral']}:a]")
-    for sname in src_idx:
-        if sname != "viral" and src_info[sname][3]:
-            audio_srcs.append(f"[{src_idx[sname]}:a]")
+    for sname, si in src_idx.items():
+        if sname == "viral":
+            continue
+        meta = src_meta[sname]
+        if meta["need_loop_align"]:
+            if (not p_mute) and meta["raw_audio"]:
+                af_parts = []
+                if abs(p_speed - 1.0) > 1e-3:
+                    af_parts.append(_atempo_chain(p_speed))
+                af_parts.append(f"atrim=duration={D:.3f},asetpts=PTS-STARTPTS")
+                pa_lbl = f"palign_a{si}"
+                fc.append(f"[{si}:a]{','.join(af_parts)}[{pa_lbl}]")
+                audio_srcs.append(f"[{pa_lbl}]")
+        else:
+            if src_info[sname][3] and not p_mute:
+                audio_srcs.append(f"[{si}:a]")
     amap = None
     if len(audio_srcs) >= 2:
         fc.append("".join(audio_srcs) + f"amix=inputs={len(audio_srcs)}:duration=longest:normalize=0,volume={volume:.2f}[outa]")

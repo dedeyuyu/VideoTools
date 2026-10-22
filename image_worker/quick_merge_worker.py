@@ -3,17 +3,20 @@
 quick_merge_worker.py — 快速合并后台渲染线程
 
 支持功能：
-- 2~5 个视频板块按名称相似度或开头数字匹配成组
-- 组内有多个视频时按板块顺序依次拼接（视频1 -> 视频2 -> ...）
+- 1 个板块（单板块自动归类合并）或 2~5 个板块配对合并
+- 按名称相似度（可设阈值）或文件名开头数字自动匹配成组
+- 支持「按顺序合并」与「随机顺序合并」
+- 支持设置「每组输出数量」（当输出数量 > 1 时，多段匹配组会进行多轮合并，随机模式下每轮重新随机打乱顺序）
 - 未匹配到的视频（只有 1 段）直接单独输出，同样应用静音/倍速/尺寸设置
 - 保留原声 / 去除原声（支持全局静音及单板块静音）
 - 倍速调节（0.25x ~ 4.0x）
 - 丰富的 FFmpeg xfade 转场及自定义转场时长
-- 多种目标画幅比例（9:16、16:9、3:4、4:3、4:5、1:1、保持原片尺寸）与填充模式
-- 输出保留原视频（以视频1为主）的文件名
+- 多种目标画幅比例（9:16、16:9、3:4、4:3、4:5、1:1、19:6）与填充模式
+- 输出保留原视频（以每组主视频为准）的文件名
 """
 import os
 import re
+import random
 import difflib
 import subprocess
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -77,148 +80,272 @@ def compute_name_similarity(path_a: str, path_b: str) -> float:
     return max(r1, r2)
 
 
-def match_video_groups(
-    slot_lists: list[list[str]],
+def _match_single_slot_groups(
+    video_list: list[str],
     match_mode: str = "similarity",
     similarity_threshold: float = 0.60,
-    include_other_unmatched: bool = False,
 ) -> list[dict]:
     """
-    根据匹配模式将多个板块中的视频进行配对。
-
-    参数:
-        slot_lists: 长度为 N (2~5) 的列表，每个元素是该板块的视频路径列表
-        match_mode:
-            - "similarity": 按文件名相似度匹配（>= similarity_threshold）
-            - "number":     按文件名开头数字匹配
-            - "order":      按列表顺序依次匹配
-        similarity_threshold: 相似度阈值 (0.0 ~ 1.0)
-        include_other_unmatched: 是否将视频2~N中未匹配到的视频也单独输出
-
-    返回:
-        list of dict:
-            {
-                "clips": [(slot_index, filepath), ...],
-                "primary_path": str,      # 用于命名的基准视频路径（优先取视频1）
-                "output_name": str,       # 输出文件名（含 .mp4）
-                "match_info": str,        # 匹配说明文本
-                "is_single": bool,        # 是否仅单个视频（未匹配到其他板块）
-            }
+    单板块模式：将同一个板块中的所有视频按「开头数字」或「名称相似度」自动聚类分组。
     """
-    if not slot_lists:
-        return []
-
-    num_slots = len(slot_lists)
-    base_list = list(slot_lists[0]) if slot_lists else []
-    used_in_slot = [set() for _ in range(num_slots)]
     raw_groups = []
+    if not video_list:
+        return raw_groups
 
     if match_mode == "number":
-        # 预先建立各板块开头数字索引：{num: [idx, ...]}
-        slot_num_map = []
-        for s_idx in range(num_slots):
-            mp = {}
-            for idx, p in enumerate(slot_lists[s_idx]):
-                num = extract_leading_number(p)
-                if num is not None:
-                    mp.setdefault(num, []).append(idx)
-            slot_num_map.append(mp)
-
-        for i0, p0 in enumerate(base_list):
-            used_in_slot[0].add(i0)
-            num0 = extract_leading_number(p0)
-            clips = [(0, p0)]
-            if num0 is not None:
-                for s_idx in range(1, num_slots):
-                    candidates = slot_num_map[s_idx].get(num0, [])
-                    picked = next((c for c in candidates if c not in used_in_slot[s_idx]), None)
-                    if picked is not None:
-                        used_in_slot[s_idx].add(picked)
-                        clips.append((s_idx, slot_lists[s_idx][picked]))
-            if len(clips) > 1:
-                info = f"开头数字 #{num0}（共 {len(clips)} 段）"
-            elif num0 is not None:
-                info = f"开头数字 #{num0}（未匹配，单独输出）"
+        num_clusters = {}   # num -> list of (0, path)
+        ordered_items = []  # ("num", num) or ("single", path)
+        for p in video_list:
+            num = extract_leading_number(p)
+            if num is not None:
+                if num not in num_clusters:
+                    num_clusters[num] = []
+                    ordered_items.append(("num", num))
+                num_clusters[num].append((0, p))
             else:
-                info = "无开头数字（单独输出）"
-            raw_groups.append({
-                "clips": clips,
-                "primary_path": p0,
-                "match_info": info,
-            })
+                ordered_items.append(("single", p))
 
-    elif match_mode == "similarity":
-        # 对每个其他板块 s_idx (1..N-1)，计算所有 (i0, ik) 相似度并按从高到低贪心匹配
-        slot_matches = [{} for _ in range(num_slots)]  # slot_matches[s_idx][i0] = (ik, sim)
-        for s_idx in range(1, num_slots):
-            other_list = slot_lists[s_idx]
-            pairs = []
-            for i0, p0 in enumerate(base_list):
-                for ik, pk in enumerate(other_list):
-                    sim = compute_name_similarity(p0, pk)
-                    if sim >= similarity_threshold:
-                        pairs.append((sim, -i0, -ik, i0, ik))
-            # 最高相似度优先；相同时按原顺序优先
-            pairs.sort(reverse=True)
-            matched_i0 = set()
-            for sim, _, _, i0, ik in pairs:
-                if i0 not in matched_i0 and ik not in used_in_slot[s_idx]:
-                    matched_i0.add(i0)
-                    used_in_slot[s_idx].add(ik)
-                    slot_matches[s_idx][i0] = (ik, sim)
+        for kind, val in ordered_items:
+            if kind == "num":
+                clips = num_clusters[val]
+                primary_path = clips[0][1]
+                if len(clips) > 1:
+                    info = f"开头数字 #{val}（共 {len(clips)} 段）"
+                else:
+                    info = f"开头数字 #{val}（未匹配，单独输出）"
+                raw_groups.append({
+                    "clips": clips,
+                    "primary_path": primary_path,
+                    "match_info": info,
+                })
+            else:
+                raw_groups.append({
+                    "clips": [(0, val)],
+                    "primary_path": val,
+                    "match_info": "无开头数字（单独输出）",
+                })
+    else:
+        # 按名称相似度聚类：遍历每个视频，找相似度最高且 >= 阈值的已有分组归入；否则新建分组
+        clusters = []  # [{"primary_path": p, "clips": [(0, p), ...], "sims": [...]}, ...]
+        for p in video_list:
+            best_idx = -1
+            best_sim = -1.0
+            for c_idx, cl in enumerate(clusters):
+                # 与该组主视频或组内成员比较相似度（取最高值，同时要求与组主视频相似度不低于阈值的 85%）
+                sim_primary = compute_name_similarity(p, cl["primary_path"])
+                sim_any = max(compute_name_similarity(p, mp) for _, mp in cl["clips"])
+                sim = max(sim_primary, sim_any if sim_primary >= similarity_threshold * 0.85 else sim_primary)
+                if sim >= similarity_threshold and sim > best_sim:
+                    best_sim = sim
+                    best_idx = c_idx
+            if best_idx >= 0:
+                clusters[best_idx]["clips"].append((0, p))
+                clusters[best_idx]["sims"].append(best_sim)
+            else:
+                clusters.append({
+                    "primary_path": p,
+                    "clips": [(0, p)],
+                    "sims": [],
+                })
 
-        for i0, p0 in enumerate(base_list):
-            used_in_slot[0].add(i0)
-            clips = [(0, p0)]
-            sims = []
-            for s_idx in range(1, num_slots):
-                if i0 in slot_matches[s_idx]:
-                    ik, sim = slot_matches[s_idx][i0]
-                    clips.append((s_idx, slot_lists[s_idx][ik]))
-                    sims.append(sim)
+        for cl in clusters:
+            clips = cl["clips"]
             if len(clips) > 1:
-                avg_sim = sum(sims) / len(sims)
+                avg_sim = sum(cl["sims"]) / len(cl["sims"])
                 info = f"相似度 {int(round(avg_sim * 100))}%（共 {len(clips)} 段）"
             else:
                 info = "未达到阈值（单独输出）"
             raw_groups.append({
                 "clips": clips,
-                "primary_path": p0,
+                "primary_path": cl["primary_path"],
                 "match_info": info,
             })
 
+    return raw_groups
+
+
+def match_video_groups(
+    slot_lists: list[list[str]],
+    match_mode: str = "similarity",
+    similarity_threshold: float = 0.60,
+    include_other_unmatched: bool = False,
+    merge_order: str = "sequential",
+    output_count: int = 1,
+) -> list[dict]:
+    """
+    根据匹配模式将 1 个或多个板块中的视频进行配对，并按合并顺序与输出数量生成最终任务列表。
+
+    参数:
+        slot_lists: 长度为 N (1~5) 的列表，每个元素是该板块的视频路径列表
+        match_mode:
+            - "similarity": 按文件名相似度匹配（>= similarity_threshold）
+            - "number":     按文件名开头数字匹配
+            - "order":      按列表顺序依次匹配（多板块模式）
+        similarity_threshold: 相似度阈值 (0.0 ~ 1.0)
+        include_other_unmatched: 多板块下是否将视频2~N中未匹配到的视频也单独输出
+        merge_order:
+            - "sequential": 按顺序合并
+            - "random":     在匹配到的同组视频中随机顺序合并
+        output_count: 每组输出数量（>= 1）。当 > 1 时，多段匹配组会进行多轮合并，
+                      若为随机顺序则每一轮都会重新随机打乱顺序。
+    """
+    if not slot_lists:
+        return []
+
+    num_slots = len(slot_lists)
+    output_count = max(1, int(output_count or 1))
+
+    # ── 单板块模式（1 个板块一股脑丢入自动归类）──────────────────────────
+    if num_slots == 1:
+        raw_groups = _match_single_slot_groups(
+            slot_lists[0],
+            match_mode=match_mode,
+            similarity_threshold=similarity_threshold,
+        )
     else:
-        # 按列表顺序匹配
-        for i0, p0 in enumerate(base_list):
-            used_in_slot[0].add(i0)
-            clips = [(0, p0)]
+        # ── 多板块模式（2 ~ 5 个板块配对）────────────────────────────────
+        base_list = list(slot_lists[0]) if slot_lists else []
+        used_in_slot = [set() for _ in range(num_slots)]
+        raw_groups = []
+
+        if match_mode == "number":
+            slot_num_map = []
+            for s_idx in range(num_slots):
+                mp = {}
+                for idx, p in enumerate(slot_lists[s_idx]):
+                    num = extract_leading_number(p)
+                    if num is not None:
+                        mp.setdefault(num, []).append(idx)
+                slot_num_map.append(mp)
+
+            for i0, p0 in enumerate(base_list):
+                used_in_slot[0].add(i0)
+                num0 = extract_leading_number(p0)
+                clips = [(0, p0)]
+                if num0 is not None:
+                    for s_idx in range(1, num_slots):
+                        candidates = slot_num_map[s_idx].get(num0, [])
+                        picked = next((c for c in candidates if c not in used_in_slot[s_idx]), None)
+                        if picked is not None:
+                            used_in_slot[s_idx].add(picked)
+                            clips.append((s_idx, slot_lists[s_idx][picked]))
+                if len(clips) > 1:
+                    info = f"开头数字 #{num0}（共 {len(clips)} 段）"
+                elif num0 is not None:
+                    info = f"开头数字 #{num0}（未匹配，单独输出）"
+                else:
+                    info = "无开头数字（单独输出）"
+                raw_groups.append({
+                    "clips": clips,
+                    "primary_path": p0,
+                    "match_info": info,
+                })
+
+        elif match_mode == "similarity":
+            slot_matches = [{} for _ in range(num_slots)]
             for s_idx in range(1, num_slots):
-                if i0 < len(slot_lists[s_idx]):
-                    used_in_slot[s_idx].add(i0)
-                    clips.append((s_idx, slot_lists[s_idx][i0]))
-            info = f"顺序第 {i0 + 1} 组（共 {len(clips)} 段）" if len(clips) > 1 else f"顺序第 {i0 + 1} 组（单独输出）"
-            raw_groups.append({
+                other_list = slot_lists[s_idx]
+                pairs = []
+                for i0, p0 in enumerate(base_list):
+                    for ik, pk in enumerate(other_list):
+                        sim = compute_name_similarity(p0, pk)
+                        if sim >= similarity_threshold:
+                            pairs.append((sim, -i0, -ik, i0, ik))
+                pairs.sort(reverse=True)
+                matched_i0 = set()
+                for sim, _, _, i0, ik in pairs:
+                    if i0 not in matched_i0 and ik not in used_in_slot[s_idx]:
+                        matched_i0.add(i0)
+                        used_in_slot[s_idx].add(ik)
+                        slot_matches[s_idx][i0] = (ik, sim)
+
+            for i0, p0 in enumerate(base_list):
+                used_in_slot[0].add(i0)
+                clips = [(0, p0)]
+                sims = []
+                for s_idx in range(1, num_slots):
+                    if i0 in slot_matches[s_idx]:
+                        ik, sim = slot_matches[s_idx][i0]
+                        clips.append((s_idx, slot_lists[s_idx][ik]))
+                        sims.append(sim)
+                if len(clips) > 1:
+                    avg_sim = sum(sims) / len(sims)
+                    info = f"相似度 {int(round(avg_sim * 100))}%（共 {len(clips)} 段）"
+                else:
+                    info = "未达到阈值（单独输出）"
+                raw_groups.append({
+                    "clips": clips,
+                    "primary_path": p0,
+                    "match_info": info,
+                })
+
+        else:
+            for i0, p0 in enumerate(base_list):
+                used_in_slot[0].add(i0)
+                clips = [(0, p0)]
+                for s_idx in range(1, num_slots):
+                    if i0 < len(slot_lists[s_idx]):
+                        used_in_slot[s_idx].add(i0)
+                        clips.append((s_idx, slot_lists[s_idx][i0]))
+                info = f"顺序第 {i0 + 1} 组（共 {len(clips)} 段）" if len(clips) > 1 else f"顺序第 {i0 + 1} 组（单独输出）"
+                raw_groups.append({
+                    "clips": clips,
+                    "primary_path": p0,
+                    "match_info": info,
+                })
+
+        if include_other_unmatched or not base_list:
+            for s_idx in range(1, num_slots):
+                for ik, pk in enumerate(slot_lists[s_idx]):
+                    if ik not in used_in_slot[s_idx]:
+                        used_in_slot[s_idx].add(ik)
+                        raw_groups.append({
+                            "clips": [(s_idx, pk)],
+                            "primary_path": pk,
+                            "match_info": f"视频{s_idx + 1} 未匹配（单独输出）",
+                        })
+
+    # ── 按轮次（output_count）与合并顺序（sequential / random）展开任务 ──
+    expanded_groups = []
+    last_order_by_group = {}  # group_idx -> tuple of paths
+
+    for round_idx in range(output_count):
+        for g_idx, g in enumerate(raw_groups):
+            base_clips = list(g["clips"])
+            is_single = len(base_clips) == 1
+
+            # 第 2 轮及之后：只对有多个视频的匹配组进行额外轮次合并
+            if round_idx > 0 and is_single:
+                continue
+
+            clips = list(base_clips)
+            if not is_single and merge_order == "random":
+                prev_tuple = last_order_by_group.get(g_idx)
+                for _ in range(12):
+                    random.shuffle(clips)
+                    cur_tuple = tuple(p for _, p in clips)
+                    if cur_tuple != prev_tuple:
+                        break
+                last_order_by_group[g_idx] = tuple(p for _, p in clips)
+            else:
+                last_order_by_group[g_idx] = tuple(p for _, p in clips)
+
+            info = g["match_info"]
+            if output_count > 1 and not is_single:
+                info = f"[第{round_idx + 1}组] {info}"
+
+            expanded_groups.append({
                 "clips": clips,
-                "primary_path": p0,
+                "primary_path": g["primary_path"],
                 "match_info": info,
+                "is_single": is_single,
+                "round_idx": round_idx,
             })
 
-    # 若视频1为空，或者开启了“其他板块未匹配视频也单独输出”
-    if include_other_unmatched or not base_list:
-        for s_idx in range(1, num_slots):
-            for ik, pk in enumerate(slot_lists[s_idx]):
-                if ik not in used_in_slot[s_idx]:
-                    used_in_slot[s_idx].add(ik)
-                    raw_groups.append({
-                        "clips": [(s_idx, pk)],
-                        "primary_path": pk,
-                        "match_info": f"视频{s_idx + 1} 未匹配（单独输出）",
-                    })
-
-    # 生成保留原视频命名的输出文件名（重名自动加序号保护）
+    # ── 生成保留原视频命名的输出文件名（重名自动加 _2, _3 ... 保护）────────
     used_names = set()
     results = []
-    for g in raw_groups:
+    for g in expanded_groups:
         stem = os.path.splitext(os.path.basename(g["primary_path"]))[0]
         candidate = f"{stem}.mp4"
         if candidate.lower() in used_names:
@@ -232,7 +359,8 @@ def match_video_groups(
             "primary_path": g["primary_path"],
             "output_name": candidate,
             "match_info": g["match_info"],
-            "is_single": len(g["clips"]) == 1,
+            "is_single": g["is_single"],
+            "round_idx": g.get("round_idx", 0),
         })
 
     return results
@@ -417,7 +545,7 @@ class QuickMergeWorker(QThread):
                         filter_complex += (
                             f"{a_in}{a_spd}aresample=44100:async=1,"
                             f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                            f" asetpts=PTS-STARTPTS[a{idx}];".replace(" asetpts", "asetpts")
+                            f"asetpts=PTS-STARTPTS[a{idx}];"
                         )
 
             n_clips = len(clips)
@@ -429,7 +557,6 @@ class QuickMergeWorker(QThread):
                 if not self.mute_global:
                     filter_complex += "[a0]anull[outa];"
             elif self.transition != "none":
-                # 计算安全的转场时长（不超过最短片段时长的 45%）
                 safe_fade = min(self.transition_dur, min(durations) * 0.45)
                 safe_fade = max(0.05, safe_fade)
                 cur_v = v_streams[0]

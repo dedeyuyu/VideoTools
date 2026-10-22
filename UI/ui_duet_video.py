@@ -30,7 +30,7 @@ from image_worker.duet_worker import (
     set_cache_root, new_task_cache_dir, list_task_cache_dirs, get_card_lib_dir,
     default_template, box_layout, build_render_cmd, run_cmd, CANVAS_W, CANVAS_H,
     SOURCES, SRC_LABELS, FILL_MODES, LAYOUT_PRESETS, template_from_cells, tpl_cells,
-    sources_used, cell_rect_px, task_source,
+    sources_used, cell_rect_px, task_source, task_source_meta,
 )
 from image_worker.duet_render import (
  render_watermark_layer,    default_card, template_icon, compose_preview, render_card_layer, load_font_file,
@@ -761,32 +761,46 @@ class AlignThread(QThread):
             self.progress.emit(i, n, f"处理中 {i + 1}/{n}：{os.path.basename(vv)}")
             try:
                 vi = probe_info(vv)
+                v_dur = vi.get("duration", 0)
+                if v_dur <= 0:
+                    raise ValueError(f"无法读取主视频时长：{os.path.basename(vv)}")
                 persons = []
-                dur = vi.get("duration", 0)
+                dur = v_dur
                 for k, pv in enumerate(pvs):
+                    pi = probe_info(pv)
+                    p_dur = pi.get("duration", 0)
+                    if p_dur <= 0:
+                        raise ValueError(f"无法读取人物视频时长：{os.path.basename(pv)}")
+                    cache = pv
                     if self.skip_align:
-                        pi = probe_info(pv)
-                        cache = pv
-                        dur = max(dur, pi.get("duration", 0))
+                        dur = max(dur, p_dur)
+                        has_aud = pi.get("has_audio", False)
                     else:
-                        stem = os.path.splitext(os.path.basename(pv))[0]
-                        tag = "" if k == 0 else f"p{k + 1}_"
-                        out = os.path.join(out_dir, f"{i + 1:03d}_{tag}{stem}_aligned.mp4")
-                        r = align_person_video(pv, vv, out, self.mute_person, self.speed)
-                        cache = r["cache"]
-                        dur = r["duration"]
-                        pi = probe_info(cache)
-                    persons.append({"person": pv, "cache": cache, "w": pi.get("width", 1080),
-                                    "h": pi.get("height", 1920), "audio": pi.get("has_audio", False)})
+                        has_aud = (not self.mute_person) and pi.get("has_audio", False)
+                    persons.append({
+                        "person": pv,
+                        "cache": cache,
+                        "w": pi.get("width", 1080),
+                        "h": pi.get("height", 1920),
+                        "dur": p_dur,
+                        "audio": has_aud,
+                        "raw_audio": pi.get("has_audio", False),
+                    })
             except Exception as e:
                 self.failed.emit(str(e))
                 return
             p0 = persons[0]
             results.append({
                 "person": p0["person"], "viral": vv, "task_dir": out_dir, "cache": p0["cache"], "duration": dur,
-                "p_w": p0["w"], "p_h": p0["h"], "p_audio": p0["audio"],
-                "v_w": vi.get("width", 1080), "v_h": vi.get("height", 1920), "v_audio": vi.get("has_audio", False),
+                "p_w": p0["w"], "p_h": p0["h"], "p_dur": p0["dur"],
+                "p_audio": p0["audio"], "p_raw_audio": p0["raw_audio"],
+                "v_w": vi.get("width", 1080), "v_h": vi.get("height", 1920),
+                "v_dur": v_dur, "v_audio": vi.get("has_audio", False),
                 "extra": persons[1:],
+                "person_speed": self.speed,
+                "mute_person": self.mute_person,
+                "skip_align": self.skip_align,
+                "deferred_align": not self.skip_align,
             })
         self.progress.emit(n, n, "处理完成")
         self.done.emit(results)
@@ -795,12 +809,16 @@ class AlignThread(QThread):
 class FrameThread(QThread):
     done = pyqtSignal(str, object, float, int)   # tag, {来源: png 字节}, t, req
 
-    def __init__(self, tag, paths, t, req, parent=None):
+    def __init__(self, tag, paths, t, req, seek_times=None, parent=None):
         super().__init__(parent)
         self.tag, self.paths, self.t, self.req = tag, dict(paths), t, req
+        self.seek_times = dict(seek_times) if seek_times else {}
 
     def run(self):
-        out = {k: (extract_frame_png(pth, self.t) if pth else b"") for k, pth in self.paths.items()}
+        out = {
+            k: (extract_frame_png(pth, self.seek_times.get(k, self.t)) if pth else b"")
+            for k, pth in self.paths.items()
+        }
         self.done.emit(self.tag, out, self.t, self.req)
 
 
@@ -2008,7 +2026,7 @@ class DuetVideoUI(QWidget):
         if kind == "person":
             chk.setChecked(True)
             self.chk_mute_person = chk
-            chk.toggled.connect(self._mark_dirty)
+            chk.toggled.connect(self._on_person_opt_changed)
             opt.addWidget(chk)
             opt.addStretch()
             opt.addWidget(QLabel("播放倍速:"))
@@ -2016,8 +2034,8 @@ class DuetVideoUI(QWidget):
             self.spin_person_speed.setRange(0.25, 4.0)
             self.spin_person_speed.setSingleStep(0.05)
             self.spin_person_speed.setValue(1.0)
-            self.spin_person_speed.setToolTip("所有人物视频对齐时的播放倍速")
-            self.spin_person_speed.valueChanged.connect(self._mark_dirty)
+            self.spin_person_speed.setToolTip("所有人物视频合成时的播放倍速")
+            self.spin_person_speed.valueChanged.connect(self._on_person_opt_changed)
             opt.addWidget(self.spin_person_speed)
         elif kind != "viral":
             opt.addWidget(QLabel("静音/倍速 与「人物视频1」相同"))
@@ -2066,6 +2084,21 @@ class DuetVideoUI(QWidget):
             self.aligned = False
         self._tpl_frames = {}
         self.update_align_status()
+
+    def _on_person_opt_changed(self, *a):
+        mute = self.chk_mute_person.isChecked() if hasattr(self, "chk_mute_person") else True
+        spd = self.spin_person_speed.value() if hasattr(self, "spin_person_speed") else 1.0
+        for t in getattr(self, "tasks", []) or []:
+            t["mute_person"] = mute
+            t["person_speed"] = spd
+            if "p_raw_audio" in t:
+                t["p_audio"] = (not mute) and bool(t["p_raw_audio"])
+            for ex in t.get("extra") or []:
+                if "raw_audio" in ex:
+                    ex["audio"] = (not mute) and bool(ex["raw_audio"])
+        self._frame_cache.clear()
+        if self.stack.currentIndex() == 2:
+            self.request_preview_frames()
 
     def _src_list(self, src):
         if src == "viral":
@@ -2894,6 +2927,21 @@ class DuetVideoUI(QWidget):
                 out[s] = info[0]
         return out
 
+    def _task_seek_times(self, t, tm):
+        seek = {}
+        p_speed = max(0.1, float(self.spin_person_speed.value() if hasattr(self, "spin_person_speed") else t.get("person_speed", 1.0)))
+        for s in sources_used(self.active_tpl()):
+            if s == "viral":
+                seek[s] = tm
+            else:
+                meta = task_source_meta(t, s)
+                if meta and meta.get("need_loop_align"):
+                    p_dur = meta.get("dur", 0.0)
+                    seek[s] = ((tm * p_speed) % p_dur) if p_dur > 0.1 else (tm * p_speed)
+                else:
+                    seek[s] = tm
+        return seek
+
     def request_preview_frames(self):
         if not self.tasks or self.stack.currentIndex() != 2:
             return
@@ -2903,11 +2951,12 @@ class DuetVideoUI(QWidget):
         if all((pth, tm) in self._frame_cache for pth in paths.values()):
             self.redraw_preview()
             return
-        self._start_frame_thread("preview", paths, tm)
+        seek_times = self._task_seek_times(t, tm)
+        self._start_frame_thread("preview", paths, tm, seek_times=seek_times)
 
-    def _start_frame_thread(self, tag, paths, tm):
+    def _start_frame_thread(self, tag, paths, tm, seek_times=None):
         self._frame_req += 1
-        th = FrameThread(tag, paths, tm, self._frame_req, self)
+        th = FrameThread(tag, paths, tm, self._frame_req, seek_times=seek_times, parent=self)
         th.done.connect(self._on_frames)
         th.finished.connect(lambda: self._threads.remove(th) if th in self._threads else None)
         self._threads.append(th)
@@ -3086,7 +3135,7 @@ class DuetVideoUI(QWidget):
         rv.addWidget(self.txt_log, 1)
         row = QHBoxLayout()
         b_open = QPushButton("📂 打开输出文件夹")
-        b_open.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(self.txt_export_dir.text())))
+        b_open.clicked.connect(self._open_export_folder)
         b_cache = QPushButton("🧹 清理临时缓存")
         b_cache.setStyleSheet("color: #E53E3E;")
         b_cache.clicked.connect(self.clear_cache)
@@ -3174,14 +3223,42 @@ class DuetVideoUI(QWidget):
             return bool(cfg.get("image_path")) and os.path.isfile(cfg["image_path"])
         return bool((text or "").strip())
 
+    def _open_export_folder(self):
+        target = getattr(self, "_last_batch_export_dir", "")
+        if not target or not os.path.isdir(target):
+            target = self.txt_export_dir.text().strip()
+        if target:
+            os.makedirs(target, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+
+    def _next_export_batch_dir(self, base_dir: str) -> str:
+        """在用户指定的导出目录中自动生成「合拍&YYYY-MM-DD&序号」子文件夹，当天多次导出序号递增 +1。"""
+        import datetime, re
+        base_dir = os.path.abspath(base_dir.strip())
+        if re.match(r'^合拍&\d{4}-\d{2}-\d{2}&\d+$', os.path.basename(base_dir)):
+            base_dir = os.path.dirname(base_dir)
+        today_str = datetime.date.today().strftime("%Y-%m-%d")
+        prefix = f"合拍&{today_str}&"
+        max_seq = 0
+        if os.path.isdir(base_dir):
+            for name in os.listdir(base_dir):
+                if name.startswith(prefix):
+                    tail = name[len(prefix):]
+                    if tail.isdigit():
+                        max_seq = max(max_seq, int(tail))
+        seq = max_seq + 1
+        while os.path.exists(os.path.join(base_dir, f"{prefix}{seq}")):
+            seq += 1
+        return os.path.join(base_dir, f"{prefix}{seq}")
+
     def start_render(self):
         if self._render_thread and self._render_thread.isRunning():
             return
         if not self.aligned or not self.tasks:
             QMessageBox.warning(self, "无法导出", "请先完成「对齐时间线」。")
             return
-        out_dir = self.txt_export_dir.text().strip()
-        if not out_dir:
+        base_out_dir = self.txt_export_dir.text().strip()
+        if not base_out_dir:
             QMessageBox.warning(self, "无法导出", "请选择导出文件夹。")
             return
         need = sources_used(self.active_tpl())
@@ -3199,6 +3276,7 @@ class DuetVideoUI(QWidget):
         if not selected:
             QMessageBox.warning(self, "无法导出", "没有勾选任何任务，请至少勾选一个。")
             return
+        out_dir = self._next_export_batch_dir(base_out_dir)
         if QMessageBox.question(self, "确认批量导出",
                                 f"即将导出 {len(selected)} / {len(self.tasks)} 个任务到：\n{out_dir}\n\n确定开始吗？",
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
@@ -3206,6 +3284,7 @@ class DuetVideoUI(QWidget):
             return
         self.save_settings()   # 导出前先把当前所有设置落盘，防止中途崩溃丢失
         os.makedirs(out_dir, exist_ok=True)
+        self._last_batch_export_dir = out_dir
         if not self.task_dir or not os.path.isdir(self.task_dir):
             self.task_dir = new_task_cache_dir()
         card_dir = os.path.join(self.task_dir, "cards")
@@ -3255,6 +3334,8 @@ class DuetVideoUI(QWidget):
                            global_speed=self.spin_speed.value(),
                            max_3min=self.chk_max_3min.isChecked(),
                            mute_viral=self.chk_mute_viral.isChecked(),
+                           person_speed=self.spin_person_speed.value(),
+                           mute_person=self.chk_mute_person.isChecked(),
                            volume=self.slider_volume.value() / 100.0,
                            out_w=ow, out_h=oh, quality=self.cmb_quality.currentData()),
             })
@@ -3281,7 +3362,8 @@ class DuetVideoUI(QWidget):
     def _on_render_done(self, ok, n):
         self.btn_render.setEnabled(True)
         self.render_progress.setFormat(f"完成 {ok} / {n}")
-        QMessageBox.information(self, "批量合成完成", f"成功 {ok} 个，失败 {n - ok} 个。\n输出目录：{self.txt_export_dir.text()}")
+        out_dir = getattr(self, "_last_batch_export_dir", "") or self.txt_export_dir.text()
+        QMessageBox.information(self, "批量合成完成", f"成功 {ok} 个，失败 {n - ok} 个。\n输出目录：{out_dir}")
 
     def _choose_cache_root(self):
         d = QFileDialog.getExistingDirectory(self, "选择缓存存储位置", get_cache_dir())
