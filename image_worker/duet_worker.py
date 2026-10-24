@@ -266,6 +266,8 @@ def _layout_presets():
                            make_cell("person2", 0, 2 * T, 1, T)]),
         ("多格", "上1 / 下2", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, .5, .5),
                             make_cell("person2", .5, .5, .5, .5)]),
+        ("多格", "上2 / 下1", [make_cell("person", 0, 0, .5, .5), make_cell("person2", .5, 0, .5, .5),
+                            make_cell("viral", 0, .5, 1, .5)]),
         ("多格", "上1 / 下3", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, T, .5),
                             make_cell("person2", T, .5, T, .5), make_cell("person3", 2 * T, .5, T, .5)]),
         ("多格", "上1 / 下4", [make_cell("viral", 0, 0, 1, .5),

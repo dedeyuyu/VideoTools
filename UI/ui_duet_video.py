@@ -1821,7 +1821,7 @@ class DuetVideoUI(QWidget):
             self.templates = [default_template()]
             _save_json("templates.json", self.templates)
         self.settings = _load_json("settings.json", {})
-        if not self.settings.get("layout_presets_v3"):
+        if not self.settings.get("layout_presets_v4"):
             # 升级：把多格 / 画中画版式增量加入模板库
             names = {t["name"] for t in self.templates}
             for tab, name, cells in LAYOUT_PRESETS:
@@ -1832,6 +1832,7 @@ class DuetVideoUI(QWidget):
             self.settings["layout_presets_v1"] = True
             self.settings["layout_presets_v2"] = True
             self.settings["layout_presets_v3"] = True
+            self.settings["layout_presets_v4"] = True
         set_cache_root(self.settings.get("cache_root", ""))
         self.task_dir = ""
         self.active_tpl_name = self.settings.get("active_tpl", self.templates[0]["name"])
@@ -3568,6 +3569,7 @@ class DuetVideoUI(QWidget):
             "layout_presets_v1": True,
             "layout_presets_v2": True,
             "layout_presets_v3": True,
+            "layout_presets_v4": True,
         }
         prefs.update({k: state[k] for k in self._PREF_KEYS})
         if not has_proj:

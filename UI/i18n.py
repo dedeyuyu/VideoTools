@@ -75,6 +75,8 @@ MANUAL = {
     "多格·五格（左2右1 / 下2）": "Multi-grid·5-Grid (2L+1R / 2B)",
     "五格（左1右2 / 下2）": "5-Grid (1L+2R / 2B)",
     "多格·五格（左1右2 / 下2）": "Multi-grid·5-Grid (1L+2R / 2B)",
+    "上2 / 下1": "Top 2 / Bottom 1",
+    "多格·上2 / 下1": "Multi-grid·Top 2 / Bottom 1",
     "🔄 检查更新": "🔄 Check for Updates",
     "🔄 发现新版本 v{0}": "🔄 New Version v{0}",
     "检测 GitHub 上是否有新版本并直接下载完成更新": "Check GitHub for new releases and download/install updates",
