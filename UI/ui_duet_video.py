@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (QApplication,
     QInputDialog, QColorDialog, QFontComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QSizePolicy, QAbstractItemView, QStyledItemDelegate, QStyle,
 )
-from PyQt6.QtCore import Qt, QThread, QPoint, QPointF, pyqtSignal, QTimer, QRectF, QSize, QUrl
+from PyQt6.QtCore import Qt, QThread, QObject, QPoint, QPointF, pyqtSignal, QTimer, QRectF, QSize, QUrl
 from PyQt6.QtGui import QImage, QIcon, QPixmap, QPainterPath, QPainter, QColor, QPen, QFont, QDesktopServices, QFontDatabase, QPalette
 
 from image_worker.duet_worker import (
@@ -64,6 +64,138 @@ def _get_all_presets():
     presets = copy.deepcopy(DEFAULT_PRESETS)
     presets.update(_load_json("card_presets.json", {}))
     return presets
+
+
+# ── 卡片预设管理（排序 / 隐藏内置 / 重命名 / 批量删除）────────────────────────
+PRESET_ORDER_FILE = "card_preset_order.json"      # {"title": [名称...], "phone": [名称...]}
+PRESET_HIDDEN_FILE = "card_presets_hidden.json"   # 被用户删除的内置预设名称
+
+_BUILTIN_PRESET_NAMES = {
+    '黄金强光贴纸 (El Resplandor Dorado)', '霓虹青空发光体 (Cielo Neón)', '街头冲击 (Impacto Urbano)',
+    '纯净极简 (Minimalismo Puro)', '复古报纸 (Titular de Prensa)', '警戒红幕 (Alerta Roja)',
+    '深海权威 (Autoridad Profunda)', '复古羊皮纸 (Pergamino Clásico)', '活力柑橘 (Cítrico Vibrante)',
+    '极简白盒 (Caja Blanca Minimalista)', '暗流暗盒 (Caja Oscura)', '紫水晶滤镜 (Filtro Amatista)',
+    '毛玻璃翠绿 (Verde Esmerilado)', '赛博深灰 (Gris Cibernético)', '柔和米黄带 (Cinta Beige Suave)',
+    '官方生态分层 (Ecosistema WhatsApp)', '专业深海拼图 (Azul Profesional)', '极简黑白交界 (Frontera Monocromática)',
+    '牧师呼召紫带 (Llamado Pastoral)', '黄金金融分割 (División Financiera)', '磨砂白玉胶囊 (Vidrio Esmerilado)',
+    '暗夜流金 (Noche Dorada)', '翠绿信任盾牌 (Escudo Verde)', '极简半透黑盒 (Caja Translúcida)',
+    '纯白云朵悬浮 (Nube Blanca)', '红色下划线警告 (Subrayado Urgente)', '警戒黄黑封条 (Cinta de Precaución)',
+    '荧光焦点框 (Marco de Enfoque Neón)', '优惠警报红底 (Alerta de Oferta)', '科技蓝图指示牌 (Plano Tecnológico)',
+}
+
+
+def _preset_is_user(name, cfg):
+    v = (cfg or {}).get("_is_user")
+    if v is not None:
+        return bool(v)
+    return not (name.startswith("热门 -") or name in _BUILTIN_PRESET_NAMES)
+
+
+def _preset_kind(name, cfg):
+    k = (cfg or {}).get("_kind")
+    return k if k else ("phone" if "电话" in name else "title")
+
+
+def _visible_presets():
+    """全部预设（内置 + 用户），去掉被用户删除的内置预设。"""
+    presets = _get_all_presets()
+    hidden = set(_load_json(PRESET_HIDDEN_FILE, []) or [])
+    return {k: v for k, v in presets.items() if k not in hidden}
+
+
+def ordered_preset_names(kind):
+    """按用户自定义顺序返回某类卡片的预设名称；新保存的预设排在最前，未排序的内置预设排在最后。"""
+    presets = _visible_presets()
+    names = [n for n, c in presets.items() if _preset_kind(n, c) == kind]
+    order = (_load_json(PRESET_ORDER_FILE, {}) or {}).get(kind, []) or []
+    nameset = set(names)
+    saved = [n for n in order if n in nameset]
+    seen = set(saved)
+    new_user = [n for n in names if n not in seen and _preset_is_user(n, presets[n])]
+    new_user.reverse()
+    new_def = [n for n in names if n not in seen and not _preset_is_user(n, presets[n])]
+    return new_user + saved + new_def
+
+
+def save_preset_order(kind, names):
+    d = _load_json(PRESET_ORDER_FILE, {}) or {}
+    d[kind] = list(names)
+    _save_json(PRESET_ORDER_FILE, d)
+
+
+def preset_cfg_by_name(name):
+    """按名称取预设配置（去掉内部字段）；找不到返回 None。"""
+    cfg = _visible_presets().get((name or "").strip())
+    if cfg is None:
+        return None
+    return {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+
+
+def _unhide_preset(name):
+    hidden = list(_load_json(PRESET_HIDDEN_FILE, []) or [])
+    if name in hidden:
+        hidden.remove(name)
+        _save_json(PRESET_HIDDEN_FILE, hidden)
+
+
+def delete_presets(names):
+    """批量删除预设：用户预设直接删除；内置预设记录为隐藏（可在管理面板一键恢复）。"""
+    from UI.default_presets import DEFAULT_PRESETS
+    user = _load_json("card_presets.json", {}) or {}
+    hidden = list(_load_json(PRESET_HIDDEN_FILE, []) or [])
+    for n in names:
+        user.pop(n, None)
+        if n in DEFAULT_PRESETS and n not in hidden:
+            hidden.append(n)
+    _save_json("card_presets.json", user)
+    _save_json(PRESET_HIDDEN_FILE, hidden)
+
+
+def rename_preset(old, new):
+    """重命名预设（内置预设会复制为同样式的用户预设，并隐藏原内置名称）。返回 (成功, 错误信息)。"""
+    import copy
+    from UI.default_presets import DEFAULT_PRESETS
+    new = (new or "").strip()
+    presets = _visible_presets()
+    if old not in presets:
+        return False, "找不到原预设。"
+    if not new:
+        return False, "名称不能为空。"
+    if new != old and new in presets:
+        return False, "该名称已存在！"
+    if new == old:
+        return True, ""
+    cfg = copy.deepcopy(presets[old])
+    kind = _preset_kind(old, cfg)
+    cfg["_kind"] = kind
+    cfg["_is_user"] = True
+    user = _load_json("card_presets.json", {}) or {}
+    user.pop(old, None)
+    user[new] = cfg
+    _save_json("card_presets.json", user)
+    hidden = list(_load_json(PRESET_HIDDEN_FILE, []) or [])
+    if old in DEFAULT_PRESETS and old not in hidden:
+        hidden.append(old)
+    if new in hidden:
+        hidden.remove(new)
+    _save_json(PRESET_HIDDEN_FILE, hidden)
+    d = _load_json(PRESET_ORDER_FILE, {}) or {}
+    for k, lst in d.items():
+        d[k] = [new if n == old else n for n in (lst or [])]
+    _save_json(PRESET_ORDER_FILE, d)
+    return True, ""
+
+
+def _parse_pasted_table(text: str) -> list:
+    """解析从 Excel / 表格复制的多列内容 → [[单元格, ...], ...]（支持带引号的单元格内换行）。"""
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    try:
+        rows = [list(r) for r in csv.reader(io.StringIO(text), delimiter="\t")]
+    except Exception:
+        rows = [line.split("\t") for line in text.split("\n")]
+    while rows and not any((c or "").strip() for c in rows[-1]):
+        rows.pop()
+    return rows
 
 
 def _load_json(name, default):
@@ -627,6 +759,492 @@ class PasteDialog(QDialog):
         return _parse_pasted(self.edit.toPlainText())
 
 
+class PresetManagerDialog(QDialog):
+    """卡片预设管理面板：搜索、多选批量删除、置顶/上移/下移/置底、拖拽排序、重命名、应用。"""
+    applyRequested = pyqtSignal(str)
+    presetsChanged = pyqtSignal()
+
+    def __init__(self, kind, current="", parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.setWindowTitle(f"管理{'标题' if kind == 'title' else '电话'}卡片预设")
+        self.resize(560, 640)
+        self.order = ordered_preset_names(kind)
+        self._syncing = False
+
+        v = QVBoxLayout(self)
+        self.txt_search = QLineEdit()
+        self.txt_search.setPlaceholderText("🔍 搜索预设名称（支持部分匹配）…")
+        self.txt_search.setClearButtonEnabled(True)
+        self.txt_search.textChanged.connect(self._rebuild)
+        v.addWidget(self.txt_search)
+
+        body = QHBoxLayout()
+        self.lst = QListWidget()
+        self.lst.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.lst.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.lst.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.lst.model().rowsMoved.connect(self._on_rows_moved)
+        self.lst.itemDoubleClicked.connect(lambda it: self._apply())
+        self.lst.itemSelectionChanged.connect(self._update_count)
+        body.addWidget(self.lst, 1)
+
+        side = QVBoxLayout()
+        def _b(text, tip, slot):
+            b = QPushButton(text)
+            b.setToolTip(tip)
+            b.clicked.connect(slot)
+            side.addWidget(b)
+            return b
+        _b("⏫ 置顶", "把选中的预设移到最前面", lambda: self._move("top"))
+        _b("⬆ 上移", "把选中的预设上移一位", lambda: self._move("up"))
+        _b("⬇ 下移", "把选中的预设下移一位", lambda: self._move("down"))
+        _b("⏬ 置底", "把选中的预设移到最后面", lambda: self._move("bottom"))
+        side.addSpacing(10)
+        _b("✏️ 重命名", "重命名当前选中的预设", self._rename)
+        b_del = _b("🗑 删除所选", "批量删除所有选中的预设（可多选：Ctrl / Shift）", self._delete)
+        b_del.setStyleSheet("color:#E53E3E;")
+        side.addSpacing(10)
+        _b("☑ 全选", "选中当前列表（搜索结果）里的全部预设", self.lst.selectAll)
+        _b("☐ 取消选择", "取消所有选择", self.lst.clearSelection)
+        side.addSpacing(10)
+        _b("↺ 恢复内置预设", "把之前删除的内置预设全部恢复", self._restore_builtin)
+        side.addStretch()
+        b_apply = _b("✅ 应用到卡片", "把选中的预设应用到当前卡片（也可直接双击预设）", self._apply)
+        b_apply.setProperty("class", "ActionBtn")
+        body.addLayout(side)
+        v.addLayout(body, 1)
+
+        self.lbl_count = QLabel("")
+        self.lbl_count.setStyleSheet("color:#718096;")
+        v.addWidget(self.lbl_count)
+        tip = QLabel("提示：可直接用鼠标拖动预设调整顺序；搜索状态下也可以上移/下移。排序会同步到「预设」下拉框。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#718096;")
+        v.addWidget(tip)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        bb.accepted.connect(self.accept)
+        v.addWidget(bb)
+
+        self._rebuild()
+        if current:
+            for i in range(self.lst.count()):
+                if self.lst.item(i).data(Qt.ItemDataRole.UserRole) == current:
+                    self.lst.setCurrentRow(i)
+                    break
+
+    # —— 数据 ——
+    def _visible_names(self):
+        kw = self.txt_search.text().strip().lower()
+        return [n for n in self.order if not kw or kw in n.lower()]
+
+    def _rebuild(self, keep=None):
+        keep = set(keep if keep is not None else self._selected())
+        presets = _visible_presets()
+        self._syncing = True
+        self.lst.clear()
+        for n in self._visible_names():
+            builtin = not _preset_is_user(n, presets.get(n))
+            it = QListWidgetItem(n + ("    〔内置〕" if builtin else ""))
+            it.setData(Qt.ItemDataRole.UserRole, n)
+            it.setToolTip(n)
+            if builtin:
+                it.setForeground(QColor("#718096"))
+            self.lst.addItem(it)
+            if n in keep:
+                it.setSelected(True)
+        self._syncing = False
+        self._update_count()
+
+    def _selected(self):
+        return [it.data(Qt.ItemDataRole.UserRole) for it in self.lst.selectedItems()]
+
+    def _update_count(self):
+        total = len(self.order)
+        shown = self.lst.count()
+        sel = len(self.lst.selectedItems())
+        self.lbl_count.setText(f"共 {total} 个预设，当前显示 {shown} 个，已选 {sel} 个")
+
+    def _merge_visible(self, new_visible):
+        """把（可能经过搜索过滤的）可见顺序写回完整顺序：只在可见项原来占据的位置之间重新排列。"""
+        vis = set(new_visible)
+        slots = [i for i, n in enumerate(self.order) if n in vis]
+        for slot, n in zip(slots, new_visible):
+            self.order[slot] = n
+        self._commit()
+
+    def _commit(self):
+        save_preset_order(self.kind, self.order)
+        self.presetsChanged.emit()
+
+    # —— 操作 ——
+    def _on_rows_moved(self, *a):
+        if self._syncing:
+            return
+        new_visible = [self.lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.lst.count())]
+        self._merge_visible(new_visible)
+
+    def _move(self, how):
+        sel = set(self._selected())
+        if not sel:
+            QMessageBox.information(self, "提示", "请先选中要移动的预设（可多选）。")
+            return
+        vis = self._visible_names()
+        if how == "top":
+            vis = [n for n in vis if n in sel] + [n for n in vis if n not in sel]
+        elif how == "bottom":
+            vis = [n for n in vis if n not in sel] + [n for n in vis if n in sel]
+        elif how == "up":
+            for i in range(1, len(vis)):
+                if vis[i] in sel and vis[i - 1] not in sel:
+                    vis[i - 1], vis[i] = vis[i], vis[i - 1]
+        elif how == "down":
+            for i in range(len(vis) - 2, -1, -1):
+                if vis[i] in sel and vis[i + 1] not in sel:
+                    vis[i + 1], vis[i] = vis[i], vis[i + 1]
+        self._merge_visible(vis)
+        self._rebuild(keep=sel)
+        for it in self.lst.selectedItems()[:1]:
+            self.lst.scrollToItem(it)
+
+    def _rename(self):
+        sel = self._selected()
+        if len(sel) != 1:
+            QMessageBox.information(self, "提示", "请只选中一个预设进行重命名。")
+            return
+        old = sel[0]
+        new, ok = QInputDialog.getText(self, "重命名预设", "新名称:", text=old)
+        if not ok:
+            return
+        ok2, err = rename_preset(old, new)
+        if not ok2:
+            QMessageBox.warning(self, "重命名失败", err)
+            return
+        new = new.strip()
+        self.order = [new if n == old else n for n in self.order]
+        self._commit()
+        self._rebuild(keep=[new])
+
+    def _delete(self):
+        sel = self._selected()
+        if not sel:
+            QMessageBox.information(self, "提示", "请先选中要删除的预设（可按住 Ctrl / Shift 多选）。")
+            return
+        preview = "\n".join(sel[:15]) + (f"\n……等共 {len(sel)} 个" if len(sel) > 15 else "")
+        if QMessageBox.question(self, "确认删除", f"确定删除以下 {len(sel)} 个预设吗？\n\n{preview}",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                                ) != QMessageBox.StandardButton.Yes:
+            return
+        delete_presets(sel)
+        gone = set(sel)
+        self.order = [n for n in self.order if n not in gone]
+        self._commit()
+        self._rebuild(keep=[])
+
+    def _restore_builtin(self):
+        hidden = _load_json(PRESET_HIDDEN_FILE, []) or []
+        if not hidden:
+            QMessageBox.information(self, "恢复内置预设", "没有被删除的内置预设。")
+            return
+        _save_json(PRESET_HIDDEN_FILE, [])
+        self.order = ordered_preset_names(self.kind)
+        self._commit()
+        self._rebuild()
+        QMessageBox.information(self, "恢复内置预设", f"已恢复 {len(hidden)} 个内置预设（排在列表末尾）。")
+
+    def _apply(self):
+        sel = self._selected()
+        if not sel:
+            return
+        self.applyRequested.emit(sel[0])
+
+
+class _PlainTextDelegate(QStyledItemDelegate):
+    """文本列：用多行编辑框编辑（保留单元格内换行，Enter 换行，点别处/Tab 确认）。"""
+    def createEditor(self, parent, option, index):
+        ed = QPlainTextEdit(parent)
+        ed.setTabChangesFocus(True)
+        return ed
+
+    def setEditorData(self, editor, index):
+        editor.setPlainText(index.data(Qt.ItemDataRole.EditRole) or "")
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.toPlainText(), Qt.ItemDataRole.EditRole)
+
+    def updateEditorGeometry(self, editor, option, index):
+        r = option.rect
+        editor.setGeometry(r.x(), r.y(), max(r.width(), 220), max(r.height(), 80))
+
+
+class _PresetDelegate(QStyledItemDelegate):
+    """预设列：可输入可下拉选择，支持模糊搜索。"""
+    def __init__(self, names, parent=None):
+        super().__init__(parent)
+        self.names = list(names)
+
+    def createEditor(self, parent, option, index):
+        from PyQt6.QtWidgets import QCompleter
+        cb = QComboBox(parent)
+        cb.setEditable(True)
+        cb.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        cb.addItem("")
+        cb.addItems(self.names)
+        comp = QCompleter(self.names, cb)
+        comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        comp.setFilterMode(Qt.MatchFlag.MatchContains)
+        cb.setCompleter(comp)
+        return cb
+
+    def setEditorData(self, editor, index):
+        editor.setCurrentText(index.data(Qt.ItemDataRole.EditRole) or "")
+
+    def setModelData(self, editor, model, index):
+        model.setData(index, editor.currentText().strip(), Qt.ItemDataRole.EditRole)
+
+
+class _PasteTable(QTableWidget):
+    """支持 Ctrl+V 多行多列粘贴、Delete 清空选中单元格。"""
+    pasteRequested = pyqtSignal()
+    clearRequested = pyqtSignal()
+
+    def keyPressEvent(self, e):
+        from PyQt6.QtGui import QKeySequence
+        if e.matches(QKeySequence.StandardKey.Paste):
+            self.pasteRequested.emit()
+            return
+        if e.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.state() != QAbstractItemView.State.EditingState:
+            self.clearRequested.emit()
+            return
+        super().keyPressEvent(e)
+
+
+class BatchCardTableDialog(QDialog):
+    """批量编辑：标题文本 / 电话文本 / 标题预设 / 电话预设（四列，与 Excel 一一对应）。"""
+    COLS = ("标题卡片文本", "电话卡片文本", "标题卡片预设", "电话卡片预设")
+
+    def __init__(self, tasks, title_names, phone_names, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📋 批量编辑文案与预设（表格）")
+        self.resize(1100, 680)
+        self.names = {2: list(title_names), 3: list(phone_names)}
+        self.namesets = {2: set(title_names), 3: set(phone_names)}
+        self._loading = False
+
+        v = QVBoxLayout(self)
+        hint = QLabel(
+            "• 每一行对应一个任务。可以在 Excel / 表格里选中 1~4 列一起复制，点击起始单元格后按 <b>Ctrl+V</b>（或点「📋 粘贴多列」）直接粘贴。<br>"
+            "• 每列上方的「粘贴」会把剪贴板内容从第 1 行开始逐行填入该列；「清空」清空该列。选中单元格按 Delete 可清空。<br>"
+            "• 预设列填写<b>预设名称</b>（可下拉搜索选择）；<b>留空 = 不指定预设</b>，该任务卡片样式保持不变，可之后手动选择。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#718096;")
+        v.addWidget(hint)
+
+        top = QHBoxLayout()
+        b_paste_all = QPushButton("📋 粘贴多列（从选中单元格开始）")
+        b_paste_all.clicked.connect(self._paste_at_current)
+        b_clear_all = QPushButton("🧹 全部清空")
+        b_clear_all.clicked.connect(lambda: [self._clear_col(c) for c in range(4)])
+        top.addWidget(b_paste_all)
+        top.addWidget(b_clear_all)
+        top.addStretch()
+        self.chk_force = QCheckBox("强制重新套用预设（覆盖已手动微调过的卡片样式）")
+        self.chk_force.setToolTip("默认只有预设名称发生变化的任务才会重新套用预设；勾选后所有填写了预设的任务都会重新套用。")
+        top.addWidget(self.chk_force)
+        v.addLayout(top)
+
+        # 每列上方的「清空 / 粘贴」按钮条（随列宽自动对齐）
+        self.col_bar = QWidget()
+        self.col_bar.setFixedHeight(34)
+        self._col_btns = []
+        for c in range(4):
+            box = QWidget(self.col_bar)
+            hl = QHBoxLayout(box)
+            hl.setContentsMargins(2, 2, 2, 2)
+            hl.setSpacing(4)
+            bc = QPushButton("清空")
+            bc.setToolTip(f"清空「{self.COLS[c]}」整列")
+            bc.clicked.connect(lambda _, x=c: self._clear_col(x))
+            bp = QPushButton("粘贴")
+            bp.setToolTip(f"把剪贴板内容从第 1 行开始逐行粘贴到「{self.COLS[c]}」")
+            bp.clicked.connect(lambda _, x=c: self._paste_col(x))
+            hl.addWidget(bc)
+            hl.addWidget(bp)
+            self._col_btns.append(box)
+        v.addWidget(self.col_bar)
+
+        self.tbl = _PasteTable(len(tasks), 4)
+        self.tbl.setHorizontalHeaderLabels(self.COLS)
+        self.tbl.setWordWrap(True)
+        self.tbl.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        hh = self.tbl.horizontalHeader()
+        for c in range(4):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        self.tbl.setColumnWidth(0, 320)
+        self.tbl.setColumnWidth(1, 220)
+        self.tbl.setColumnWidth(2, 240)
+        self.tbl.setColumnWidth(3, 240)
+        hh.setStretchLastSection(True)
+        self.tbl.setItemDelegateForColumn(0, _PlainTextDelegate(self.tbl))
+        self.tbl.setItemDelegateForColumn(1, _PlainTextDelegate(self.tbl))
+        self.tbl.setItemDelegateForColumn(2, _PresetDelegate(self.names[2], self.tbl))
+        self.tbl.setItemDelegateForColumn(3, _PresetDelegate(self.names[3], self.tbl))
+        self.tbl.pasteRequested.connect(self._paste_at_current)
+        self.tbl.clearRequested.connect(self._clear_selected)
+        self.tbl.itemChanged.connect(self._on_item_changed)
+        v.addWidget(self.tbl, 1)
+
+        self._loading = True
+        for i, t in enumerate(tasks):
+            vh = QTableWidgetItem(f"{i + 1:02d}")
+            vh.setToolTip(os.path.basename(t.get("viral", "")))
+            self.tbl.setVerticalHeaderItem(i, vh)
+            vals = (t.get("title_text", ""), t.get("phone_text", ""),
+                    t.get("title_preset", ""), t.get("phone_preset", ""))
+            for c, val in enumerate(vals):
+                self.tbl.setItem(i, c, QTableWidgetItem(val or ""))
+        for i in range(self.tbl.rowCount()):
+            for c in (2, 3):
+                self._validate(self.tbl.item(i, c), c)
+        self._loading = False
+        self.tbl.resizeRowsToContents()
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color:#DD6B20;")
+        v.addWidget(self.lbl_status)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.button(QDialogButtonBox.StandardButton.Ok).setText("✅ 应用到全部任务")
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+        hh.sectionResized.connect(lambda *a: self._layout_col_bar())
+        hh.geometriesChanged.connect(self._layout_col_bar)
+        self.tbl.horizontalScrollBar().valueChanged.connect(lambda *a: self._layout_col_bar())
+        QTimer.singleShot(0, self._layout_col_bar)
+        self._update_status()
+
+    # —— 布局：按钮条对齐到列 ——
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._layout_col_bar()
+
+    def _layout_col_bar(self):
+        hh = self.tbl.horizontalHeader()
+        off = self.tbl.frameWidth() + self.tbl.verticalHeader().width()
+        for c, box in enumerate(self._col_btns):
+            x = off + hh.sectionViewportPosition(c)
+            w = hh.sectionSize(c)
+            box.setGeometry(int(x), 0, int(max(0, min(w, 220))), 34)
+            box.setVisible(w > 40 and x + 40 < self.col_bar.width())
+
+    # —— 数据 ——
+    def _set(self, r, c, val):
+        it = self.tbl.item(r, c)
+        if it is None:
+            it = QTableWidgetItem("")
+            self.tbl.setItem(r, c, it)
+        it.setText(val)
+
+    def _clear_col(self, c):
+        for r in range(self.tbl.rowCount()):
+            self._set(r, c, "")
+        self.tbl.resizeRowsToContents()
+
+    def _clear_selected(self):
+        for it in self.tbl.selectedItems():
+            it.setText("")
+        self.tbl.resizeRowsToContents()
+
+    def _clipboard_rows(self):
+        rows = _parse_pasted_table(QApplication.clipboard().text())
+        if not rows:
+            QMessageBox.information(self, "剪贴板为空", "剪贴板里没有可粘贴的文字，请先在 Excel / 表格中复制。")
+        return rows
+
+    def _paste_col(self, c):
+        rows = self._clipboard_rows()
+        if not rows:
+            return
+        vals = [(r[0] if r else "") for r in rows]
+        n = self.tbl.rowCount()
+        for r, val in enumerate(vals[:n]):
+            self._set(r, c, val.strip() if c >= 2 else val)
+        self.tbl.resizeRowsToContents()
+        extra = len(vals) - n
+        self._flash(f"已粘贴 {min(len(vals), n)} 行到「{self.COLS[c]}」" + (f"，多出的 {extra} 行已忽略。" if extra > 0 else "。"))
+
+    def _paste_at_current(self):
+        rows = self._clipboard_rows()
+        if not rows:
+            return
+        r0 = max(0, self.tbl.currentRow())
+        c0 = max(0, self.tbl.currentColumn())
+        n, m = self.tbl.rowCount(), 4
+        cnt = 0
+        for i, row in enumerate(rows):
+            if r0 + i >= n:
+                break
+            for j, val in enumerate(row):
+                if c0 + j >= m:
+                    break
+                c = c0 + j
+                self._set(r0 + i, c, val.strip() if c >= 2 else val)
+            cnt += 1
+        self.tbl.resizeRowsToContents()
+        extra = len(rows) - cnt
+        self._flash(f"已从第 {r0 + 1} 行「{self.COLS[c0]}」开始粘贴 {cnt} 行" +
+                    (f"，多出的 {extra} 行已忽略。" if extra > 0 else "。"))
+
+    def _flash(self, msg):
+        self._update_status(msg)
+
+    def _validate(self, it, c):
+        if it is None or c < 2:
+            return
+        txt = it.text().strip()
+        if txt and txt not in self.namesets[c]:
+            it.setForeground(QColor("#E53E3E"))
+            it.setToolTip("找不到这个预设名称，应用时会被忽略（该任务样式保持不变）。")
+        else:
+            it.setData(Qt.ItemDataRole.ForegroundRole, None)
+            it.setToolTip("")
+
+    def _on_item_changed(self, it):
+        if self._loading:
+            return
+        self._loading = True
+        self._validate(it, it.column())
+        self._loading = False
+        self._update_status()
+
+    def _update_status(self, prefix=""):
+        if not hasattr(self, "lbl_status"):
+            return
+        bad = 0
+        for r in range(self.tbl.rowCount()):
+            for c in (2, 3):
+                it = self.tbl.item(r, c)
+                if it and it.text().strip() and it.text().strip() not in self.namesets[c]:
+                    bad += 1
+        msg = prefix
+        if bad:
+            msg += ("  " if msg else "") + f"⚠️ 有 {bad} 个预设名称找不到（红色），应用时会被忽略。"
+        self.lbl_status.setText(msg)
+
+    def values(self):
+        out = []
+        for r in range(self.tbl.rowCount()):
+            row = []
+            for c in range(4):
+                it = self.tbl.item(r, c)
+                txt = it.text() if it else ""
+                row.append(txt.strip() if c >= 2 else txt)
+            out.append(tuple(row))
+        return out
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  后台线程
 # ══════════════════════════════════════════════════════════════════════════════
@@ -822,6 +1440,185 @@ class FrameThread(QThread):
         self.done.emit(self.tag, out, self.t, self.req)
 
 
+PLAY_SCALE = 0.5   # 播放预览的合成分辨率（相对 1080x1920），只影响预览，不影响导出
+
+
+class DuetPreviewPlayer(QObject):
+    """
+    多路视频同步播放（预览用）：
+      * 每一路视频一个 QMediaPlayer + QVideoSink，定时器按 ~30fps 拉取最新画面；
+      * 自己的时钟是时间基准（时间轴秒数），各路播放器按「仅标记对齐」的规则跟随：
+          主视频 / 已预先对齐的缓存：位置 = t
+          标记对齐的人物视频：循环播放，倍速 = 人物倍速，位置 = (t × 倍速) % 原时长
+      * 偏差超过 0.3 秒自动校正。
+    """
+    frameReady = pyqtSignal(object, float)   # {来源: QImage}, t
+    finished = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from PyQt6.QtCore import QElapsedTimer
+        self._items = {}
+        self._images = {}
+        self._timer = QTimer(self)
+        self._timer.setInterval(33)
+        self._timer.timeout.connect(self._tick)
+        self._clock = QElapsedTimer()
+        self._t0 = 0.0
+        self._ticks = 0
+        self._waiting = False
+        self._wait_ms = 0
+        self.playing = False
+        self.duration = 0.0
+
+    # —— 加载 / 卸载 ——
+    def load(self, task, srcs, person_speed, mute_person, mute_viral, volume):
+        from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
+        self.unload()
+        self.duration = float(task.get("duration") or 0)
+        spd = max(0.1, float(person_speed))
+        vol = max(0.0, min(1.0, float(volume)))
+        for s in srcs:
+            meta = task_source_meta(task, s)
+            if not meta or not meta.get("path") or not os.path.isfile(meta["path"]):
+                continue
+            loop = bool(meta.get("need_loop_align"))
+            dur = float(meta.get("dur") or 0)
+            if dur <= 0:
+                dur = float(probe_info(meta["path"]).get("duration", 0) or 0)
+            if s == "viral":
+                audible = bool(meta.get("audio")) and not mute_viral
+            elif loop:
+                audible = (not mute_person) and bool(meta.get("raw_audio"))
+            else:
+                audible = bool(meta.get("audio")) and not mute_person
+            pl = QMediaPlayer(self)
+            ao = QAudioOutput(self)
+            ao.setVolume(vol if audible else 0.0)
+            ao.setMuted(not audible)
+            sink = QVideoSink(self)
+            pl.setAudioOutput(ao)
+            pl.setVideoSink(sink)
+            rate = spd if loop else 1.0
+            pl.setPlaybackRate(rate)
+            if loop:
+                pl.setLoops(QMediaPlayer.Loops.Infinite)
+            pl.setSource(QUrl.fromLocalFile(meta["path"]))
+            self._items[s] = {"pl": pl, "ao": ao, "sink": sink, "loop": loop, "dur": dur,
+                              "rate": rate, "last": None}
+        return bool(self._items)
+
+    def unload(self):
+        self._timer.stop()
+        self.playing = False
+        for it in self._items.values():
+            try:
+                it["pl"].stop()
+                it["pl"].setVideoSink(None)
+                it["pl"].setSource(QUrl())
+            except Exception:
+                pass
+            for k in ("pl", "ao", "sink"):
+                it[k].deleteLater()
+        self._items = {}
+        self._images = {}
+
+    # —— 控制 ——
+    def _expected(self, it, t):
+        d = it["dur"]
+        if it["loop"]:
+            return (t * it["rate"]) % d if d > 0.05 else 0.0
+        return min(t, max(0.0, d - 0.04)) if d > 0 else t
+
+    def current_time(self):
+        if not self.playing or self._waiting:
+            return self._t0
+        return min(self.duration, self._t0 + self._clock.elapsed() / 1000.0)
+
+    def play(self, t):
+        if not self._items:
+            return
+        self._t0 = max(0.0, min(float(t), self.duration))
+        for it in self._items.values():
+            it["pl"].setPosition(int(self._expected(it, self._t0) * 1000))
+            it["pl"].play()
+        self.playing = True
+        self._waiting = True
+        self._wait_ms = 0
+        self._clock.start()
+        self._timer.start()
+
+    def pause(self):
+        t = self.current_time()
+        self._timer.stop()
+        for it in self._items.values():
+            it["pl"].pause()
+        self._t0 = t
+        self.playing = False
+        self._grab_frames()
+        return t
+
+    def seek(self, t):
+        self._t0 = max(0.0, min(float(t), self.duration))
+        self._clock.restart()
+        for it in self._items.values():
+            it["pl"].setPosition(int(self._expected(it, self._t0) * 1000))
+            if self.playing:
+                it["pl"].play()
+
+    def images(self):
+        return dict(self._images)
+
+    # —— 内部 ——
+    def _ready(self):
+        from PyQt6.QtMultimedia import QMediaPlayer
+        ok = (QMediaPlayer.MediaStatus.BufferedMedia, QMediaPlayer.MediaStatus.EndOfMedia)
+        return all(it["pl"].mediaStatus() in ok for it in self._items.values())
+
+    def _resync(self, t):
+        for it in self._items.values():
+            d = it["dur"]
+            if not it["loop"] and d > 0 and t >= d - 0.1:
+                continue          # 这一路已经播完，保持最后一帧
+            exp = self._expected(it, t)
+            pos = it["pl"].position() / 1000.0
+            diff = abs(pos - exp)
+            if it["loop"] and d > 0:
+                diff = min(diff, d - diff)
+            if diff > 0.3:
+                it["pl"].setPosition(int(exp * 1000))
+
+    def _grab_frames(self):
+        for s, it in self._items.items():
+            f = it["sink"].videoFrame()
+            if not f.isValid():
+                continue
+            stamp = f.startTime()
+            if stamp == it["last"] and s in self._images:
+                continue
+            img = f.toImage()
+            if not img.isNull():
+                self._images[s] = img
+                it["last"] = stamp
+
+    def _tick(self):
+        if self._waiting:
+            self._wait_ms += self._timer.interval()
+            if self._ready() or self._wait_ms >= 2000:
+                self._waiting = False
+                self._resync(self._t0)
+            self._clock.restart()
+        t = self.current_time()
+        self._ticks += 1
+        if not self._waiting and self._ticks % 15 == 0:
+            self._resync(t)
+        self._grab_frames()
+        self.frameReady.emit(dict(self._images), t)
+        if t >= self.duration - 1e-3 and not self._waiting:
+            self.pause()
+            self.finished.emit()
+
+
 class LayoutPickerDialog(QDialog):
     """新建模板时选择版式：常用 / 多格 / 画中画。"""
 
@@ -952,6 +1749,7 @@ class RenderThread(QThread):
 
 class CardEditor(QWidget):
     changed = pyqtSignal()
+    presetApplied = pyqtSignal(str)   # 用户从下拉框 / 管理面板套用了某个预设
 
     def __init__(self, kind="title", parent=None):
         super().__init__(parent)
@@ -1025,6 +1823,14 @@ class CardEditor(QWidget):
         b_export.setToolTip("导出当前选中的预设")
         b_export.clicked.connect(self._export_preset)
         pr.addWidget(b_export)
+
+        b_manage = QPushButton()
+        b_manage.setIcon(QIcon(_theme_icon("settings.svg")))
+        b_manage.setIconSize(QSize(18, 18))
+        b_manage.setFixedSize(32, 32)
+        b_manage.setToolTip("打开预设管理面板：搜索、批量删除、排序、重命名")
+        b_manage.clicked.connect(self._open_preset_manager)
+        pr.addWidget(b_manage)
         
         outer.addLayout(pr)
 
@@ -1326,72 +2132,48 @@ class CardEditor(QWidget):
 
     # ---- 预设（卡片库） ----
     def reload_presets(self):
-        presets = _get_all_presets()
+        cur = self.cmb_preset.currentData() if self.cmb_preset.count() else None
+        presets = _visible_presets()
         self.cmb_preset.blockSignals(True)
         self.cmb_preset.clear()
         self.cmb_preset.addItem("— 选择预设 —", None)
-        
-        user_presets = []
-        default_presets = []
-        
-        for name, cfg in presets.items():
-            is_user = cfg.get("_is_user")
-            
-            if is_user is None:
-                if name.startswith("热门 -") or name in [
-                    '黄金强光贴纸 (El Resplandor Dorado)', '霓虹青空发光体 (Cielo Neón)', '街头冲击 (Impacto Urbano)', 
-                    '纯净极简 (Minimalismo Puro)', '复古报纸 (Titular de Prensa)', '警戒红幕 (Alerta Roja)', 
-                    '深海权威 (Autoridad Profunda)', '复古羊皮纸 (Pergamino Clásico)', '活力柑橘 (Cítrico Vibrante)', 
-                    '极简白盒 (Caja Blanca Minimalista)', '暗流暗盒 (Caja Oscura)', '紫水晶滤镜 (Filtro Amatista)', 
-                    '毛玻璃翠绿 (Verde Esmerilado)', '赛博深灰 (Gris Cibernético)', '柔和米黄带 (Cinta Beige Suave)', 
-                    '官方生态分层 (Ecosistema WhatsApp)', '专业深海拼图 (Azul Profesional)', '极简黑白交界 (Frontera Monocromática)', 
-                    '牧师呼召紫带 (Llamado Pastoral)', '黄金金融分割 (División Financiera)', '磨砂白玉胶囊 (Vidrio Esmerilado)', 
-                    '暗夜流金 (Noche Dorada)', '翠绿信任盾牌 (Escudo Verde)', '极简半透黑盒 (Caja Translúcida)', 
-                    '纯白云朵悬浮 (Nube Blanca)', '红色下划线警告 (Subrayado Urgente)', '警戒黄黑封条 (Cinta de Precaución)', 
-                    '荧光焦点框 (Marco de Enfoque Neón)', '优惠警报红底 (Alerta de Oferta)', '科技蓝图指示牌 (Plano Tecnológico)'
-                ]:
-                    is_user = False
-                else:
-                    is_user = True
-                    
-            kind = cfg.get("_kind")
-            if kind is None:
-                kind = "phone" if "电话" in name else "title"
-            if kind == self.kind:
-                if is_user:
-                    user_presets.append(name)
-                else:
-                    default_presets.append(name)
-                
-        user_presets.reverse()
-        
-        if user_presets:
-            self.cmb_preset.addItem("—— 我的预设 ——", None)
-            item_model = self.cmb_preset.model()
-            item_model.item(self.cmb_preset.count()-1).setEnabled(False)
-            
-            for name in user_presets:
-                self.cmb_preset.addItem(name, name)
-                
-        if default_presets:
-            self.cmb_preset.addItem("—— 默认预设 ——", None)
-            item_model = self.cmb_preset.model()
-            item_model.item(self.cmb_preset.count()-1).setEnabled(False)
-            
-            for name in default_presets:
-                self.cmb_preset.addItem(name, name)
-
+        for name in ordered_preset_names(self.kind):
+            builtin = not _preset_is_user(name, presets.get(name))
+            self.cmb_preset.addItem(name + ("  〔内置〕" if builtin else ""), name)
+        idx = self.cmb_preset.findData(cur) if cur else -1
+        self.cmb_preset.setCurrentIndex(max(0, idx))
         self.cmb_preset.blockSignals(False)
+
+    def select_preset_name(self, name):
+        """仅更新下拉框显示（不套用样式）。"""
+        self.cmb_preset.blockSignals(True)
+        idx = self.cmb_preset.findData(name) if name else -1
+        self.cmb_preset.setCurrentIndex(max(0, idx))
+        self.cmb_preset.blockSignals(False)
+
+    def apply_preset_by_name(self, name):
+        presets = _visible_presets()
+        if name not in presets:
+            return False
+        cfg = dict(presets[name])
+        cfg["time"] = self.w["time"].value()   # 时间线不随预设改变
+        self.set_cfg(cfg)
+        self.select_preset_name(name)
+        self.presetApplied.emit(name)
+        return True
 
     def _apply_preset(self, idx):
         name = self.cmb_preset.itemData(idx)
         if not name:
             return
-        presets = _get_all_presets()
-        if name in presets:
-            cfg = dict(presets[name])
-            cfg["time"] = self.w["time"].value()   # 时间线不随预设改变
-            self.set_cfg(cfg)
+        self.apply_preset_by_name(name)
+
+    def _open_preset_manager(self):
+        dlg = PresetManagerDialog(self.kind, self.cmb_preset.currentData() or "", self)
+        dlg.presetsChanged.connect(self.reload_presets)
+        dlg.applyRequested.connect(self.apply_preset_by_name)
+        dlg.exec()
+        self.reload_presets()
 
     def _get_preset_cfg_to_save(self):
         cfg = self.get_cfg()
@@ -1416,6 +2198,7 @@ class CardEditor(QWidget):
         presets = _load_json("card_presets.json", {})
         presets[name.strip()] = self._get_preset_cfg_to_save()
         _save_json("card_presets.json", presets)
+        _unhide_preset(name.strip())
         self.reload_presets()
         self.cmb_preset.setCurrentIndex(self.cmb_preset.findData(name.strip()))
 
@@ -1435,35 +2218,24 @@ class CardEditor(QWidget):
         old_name = self.cmb_preset.currentData()
         if not old_name:
             return
-        presets = _load_json("card_presets.json", {})
-        if old_name not in presets or presets.get(old_name, {}).get("_is_user") is False:
-            QMessageBox.warning(self, "提示", "这是内置默认预设，无法重命名。")
-            return
         new_name, ok = QInputDialog.getText(self, "重命名预设", "新名称:", text=old_name)
         if not ok or not new_name.strip() or new_name.strip() == old_name:
             return
-        new_name = new_name.strip()
-        if new_name in presets:
-            QMessageBox.warning(self, "提示", "该名称已存在！")
+        ok2, err = rename_preset(old_name, new_name)
+        if not ok2:
+            QMessageBox.warning(self, "提示", err)
             return
-        presets[new_name] = presets.pop(old_name)
-        _save_json("card_presets.json", presets)
         self.reload_presets()
-        self.cmb_preset.setCurrentIndex(self.cmb_preset.findData(new_name))
+        self.cmb_preset.setCurrentIndex(self.cmb_preset.findData(new_name.strip()))
 
     def _del_preset(self):
         name = self.cmb_preset.currentData()
         if not name:
             return
-        presets = _load_json("card_presets.json", {})
-        if name not in presets or presets.get(name, {}).get("_is_user") is False:
-            QMessageBox.warning(self, "提示", "这是内置默认预设，无法删除。")
-            return
-        reply = QMessageBox.question(self, "确认删除", f"确定要删除预设 '{name}' 吗？",
+        reply = QMessageBox.question(self, "确认删除", f"确定要删除预设 '{name}' 吗？\n（内置预设删除后可在「管理预设」面板中恢复）",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            presets.pop(name, None)
-            _save_json("card_presets.json", presets)
+            delete_presets([name])
             self.reload_presets()
 
     def _export_preset(self):
@@ -1520,6 +2292,8 @@ class CardEditor(QWidget):
                 
         if imported_count > 0:
             _save_json("card_presets.json", presets)
+            hidden = [n for n in (_load_json(PRESET_HIDDEN_FILE, []) or []) if n not in presets]
+            _save_json(PRESET_HIDDEN_FILE, hidden)
             self.reload_presets()
             QMessageBox.information(self, "成功", f"成功导入了 {imported_count} 个预设！")
 
@@ -1809,6 +2583,9 @@ class DuetVideoUI(QWidget):
         self._align_thread = None
         self._render_thread = None
         self.cur_task = 0
+        self._player = None        # 播放预览
+        self._player_key = None
+        self._play_ov = None
 
         user_saved = _load_json("templates.json", None)
         if user_saved is None:
@@ -2087,6 +2864,7 @@ class DuetVideoUI(QWidget):
         self.update_align_status()
 
     def _on_person_opt_changed(self, *a):
+        self._pause_playback(snapshot=False)
         mute = self.chk_mute_person.isChecked() if hasattr(self, "chk_mute_person") else True
         spd = self.spin_person_speed.value() if hasattr(self, "spin_person_speed") else 1.0
         for t in getattr(self, "tasks", []) or []:
@@ -2213,6 +2991,8 @@ class DuetVideoUI(QWidget):
                                             "viral": {"dx": 0, "dy": 0, "scale": 100}})
                 if "title_cfg" in prev: r["title_cfg"] = prev["title_cfg"]
                 if "phone_cfg" in prev: r["phone_cfg"] = prev["phone_cfg"]
+                for pk in ("title_preset", "phone_preset"):
+                    if pk in prev: r[pk] = prev[pk]
             else:
                 r["title_text"] = ""
                 r["phone_text"] = ""
@@ -2571,6 +3351,8 @@ class DuetVideoUI(QWidget):
         name = cmb.currentData()
         if not name:
             return
+        self._pause_playback(snapshot=False)
+        self._player_key = None
         self.active_tpl_name = name
         for other in (self.cmb_tpl_material, self.cmb_tpl_cards):
             if other is not cmb:
@@ -2648,6 +3430,11 @@ class DuetVideoUI(QWidget):
         self.time_slider.valueChanged.connect(self._on_time_change)
         mv.addWidget(self.time_slider)
         tr = QHBoxLayout()
+        self.btn_play = QPushButton("▶ 播放")
+        self.btn_play.setToolTip("连续播放当前任务的合成效果（含卡片 / 水印，人物视频按倍速循环）；播放中拖动时间轴可跳转")
+        self.btn_play.setMinimumWidth(86)
+        self.btn_play.clicked.connect(self.toggle_playback)
+        tr.addWidget(self.btn_play)
         self.lbl_time = QLabel("0.0s / 0.0s")
         tr.addWidget(self.lbl_time, 1)
         self.btn_preview_title = QPushButton("看标题卡片")
@@ -2687,6 +3474,8 @@ class DuetVideoUI(QWidget):
         
         self.title_editor = CardEditor("title")
         self.phone_editor = CardEditor("phone")
+        self.title_editor.presetApplied.connect(lambda n: self._on_editor_preset("title", n))
+        self.phone_editor.presetApplied.connect(lambda n: self._on_editor_preset("phone", n))
         self.card_tabs.addTab(self._wrap_editor("title", self.title_editor), "🅰 标题卡片")
         self.card_tabs.addTab(self._wrap_editor("phone", self.phone_editor), "📞 电话卡片")
         self.wm_editor = WatermarkEditor(self)
@@ -2712,13 +3501,24 @@ class DuetVideoUI(QWidget):
         tv.addWidget(self.txt_phone)
         
         btn_lay = QHBoxLayout()
-        b1 = QPushButton("📋 批量粘贴标题文本")
-        b1.clicked.connect(lambda: self._batch_paste("title_text", "批量导入标题文本"))
-        b2 = QPushButton("📋 批量粘贴电话文本")
-        b2.clicked.connect(lambda: self._batch_paste("phone_text", "批量导入电话文本"))
-        btn_lay.addWidget(b1)
-        btn_lay.addWidget(b2)
+        b_tbl = QPushButton("📋 批量编辑文案与预设（表格）")
+        b_tbl.setToolTip("四列表格：标题文本 / 电话文本 / 标题预设 / 电话预设，可直接从 Excel 复制粘贴")
+        b_tbl.clicked.connect(self._open_batch_table)
+        btn_lay.addWidget(b_tbl)
         tv.addLayout(btn_lay)
+
+        # 替换视频（当前任务）
+        self.gb_replace = QGroupBox("🔁 替换视频（当前任务）")
+        self.replace_lay = QVBoxLayout(self.gb_replace)
+        self.replace_lay.setSpacing(4)
+        self._replace_rows = QVBoxLayout()
+        self.replace_lay.addLayout(self._replace_rows)
+        rtip = QLabel("只替换当前这一组任务的视频，其它任务不受影响；文案、卡片、画面微调都会保留，"
+                      "时间线标记会同步更新，导出时以替换后的视频为准。")
+        rtip.setWordWrap(True)
+        rtip.setStyleSheet("color:#718096;")
+        self.replace_lay.addWidget(rtip)
+        tv.addWidget(self.gb_replace)
 
         gb = QGroupBox("🎯 画面单项微调（当前任务）")
         f = QFormLayout(gb)
@@ -2795,6 +3595,7 @@ class DuetVideoUI(QWidget):
     def _on_task_select(self, row):
         if row < 0 or row >= len(self.tasks):
             return
+        self._pause_playback(snapshot=False)
         self.cur_task = row
         t = self.tasks[row]
         for w in (self.txt_title, self.txt_phone):
@@ -2823,6 +3624,7 @@ class DuetVideoUI(QWidget):
             else:
                 editor.set_cfg(getattr(self, f"global_{kind}_cfg"))
             editor.blockSignals(False)
+            editor.select_preset_name(t.get(f"{kind}_preset", "") if f"{kind}_cfg" in t else "")
             
         self.time_slider.blockSignals(True)
         self.time_slider.setRange(0, max(1, int(t["duration"] * 10)))
@@ -2852,6 +3654,193 @@ class DuetVideoUI(QWidget):
         self.cmb_adj_src.setCurrentIndex(max(0, self.cmb_adj_src.findData(cur)))
         self.cmb_adj_src.blockSignals(False)
         self._load_adj_widgets()
+        self._refresh_replace_rows()
+
+    # ── 替换当前任务的视频 ──────────────────────────────────────────────────
+    def _refresh_replace_rows(self):
+        lay = getattr(self, "_replace_rows", None)
+        if lay is None:
+            return
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        if not self.tasks:
+            lbl = QLabel("对齐时间线后可在这里替换每组任务的视频。")
+            lbl.setStyleSheet("color:#718096;")
+            lay.addWidget(lbl)
+            return
+        t = self.tasks[self.cur_task]
+        for s in sources_used(self.active_tpl()):
+            row = QWidget()
+            hl = QHBoxLayout(row)
+            hl.setContentsMargins(0, 0, 0, 0)
+            name_lbl = QLabel(SRC_LABELS[s] + ":")
+            name_lbl.setFixedWidth(72)
+            hl.addWidget(name_lbl)
+            info = task_source(t, s)
+            orig = self._orig_source_path(t, s)
+            if orig:
+                f_lbl = QLabel(os.path.basename(orig))
+                f_lbl.setToolTip(orig)
+                if not os.path.isfile(orig):
+                    f_lbl.setStyleSheet("color:#E53E3E;")
+                    f_lbl.setToolTip(orig + "\n（文件不存在，请替换）")
+            else:
+                f_lbl = QLabel("（本任务没有这一路视频）")
+                f_lbl.setStyleSheet("color:#DD6B20;")
+            f_lbl.setMinimumWidth(60)
+            f_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            hl.addWidget(f_lbl, 1)
+            b = QPushButton("替换…" if info else "添加…")
+            b.setToolTip(f"为第 {self.cur_task + 1} 组任务重新选择「{SRC_LABELS[s]}」")
+            b.clicked.connect(lambda _, x=s: self._replace_task_video(x))
+            hl.addWidget(b)
+            lay.addWidget(row)
+
+    @staticmethod
+    def _orig_source_path(t, s):
+        """任务里该路视频的原始文件路径（不是对齐缓存）。"""
+        if s == "viral":
+            return t.get("viral", "")
+        if s == "person":
+            return t.get("person") or t.get("cache") or ""
+        try:
+            k = int(s.replace("person", "")) - 2
+        except ValueError:
+            return ""
+        ex = t.get("extra") or []
+        if 0 <= k < len(ex) and ex[k]:
+            return ex[k].get("person") or ex[k].get("cache") or ""
+        return ""
+
+    def _recompute_task_duration(self, t):
+        vd = float(t.get("v_dur") or 0)
+        if vd <= 0 and t.get("viral"):
+            vd = probe_info(t["viral"]).get("duration", 0)
+            t["v_dur"] = vd
+        dur = vd
+        if t.get("skip_align"):
+            pd = float(t.get("p_dur") or 0)
+            if pd <= 0 and (t.get("cache") or t.get("person")):
+                pd = probe_info(t.get("cache") or t.get("person")).get("duration", 0)
+            dur = max(dur, pd)
+            for e in t.get("extra") or []:
+                if e:
+                    dur = max(dur, float(e.get("dur") or 0))
+        if dur > 0:
+            t["duration"] = dur
+
+    def _replace_task_video(self, src):
+        if not self.tasks:
+            return
+        i = self.cur_task
+        t = self.tasks[i]
+        old = self._orig_source_path(t, src)
+        start_dir = os.path.dirname(old) if old else ""
+        fn, _ = QFileDialog.getOpenFileName(
+            self, f"替换第 {i + 1} 组任务的「{SRC_LABELS[src]}」", start_dir,
+            "视频文件 (" + " ".join(f"*.{e}" for e in VIDEO_EXTS) + ")")
+        if not fn:
+            return
+        pi = probe_info(fn)
+        if pi.get("duration", 0) <= 0:
+            QMessageBox.warning(self, "无法替换", f"无法读取视频时长，可能不是有效的视频文件：\n{fn}")
+            return
+        mute = self.chk_mute_person.isChecked()
+        has_a = bool(pi.get("has_audio"))
+        if src == "viral":
+            t.update(viral=fn, v_w=pi.get("width", 1080), v_h=pi.get("height", 1920),
+                     v_audio=has_a, v_dur=pi["duration"])
+        else:
+            aud = has_a if t.get("skip_align") else ((not mute) and has_a)
+            if src == "person":
+                t.update(person=fn, cache=fn, p_w=pi.get("width", 1080), p_h=pi.get("height", 1920),
+                         p_dur=pi["duration"], p_raw_audio=has_a, p_audio=aud)
+            else:
+                k = int(src.replace("person", "")) - 2
+                ex = t.get("extra") or []
+                while len(ex) <= k:
+                    ex.append({})
+                ex[k] = {"person": fn, "cache": fn, "w": pi.get("width", 1080), "h": pi.get("height", 1920),
+                         "dur": pi["duration"], "raw_audio": has_a, "audio": aud}
+                t["extra"] = ex
+            t.setdefault("person_speed", self.spin_person_speed.value())
+            t.setdefault("mute_person", mute)
+        old_dur = t.get("duration", 0)
+        self._recompute_task_duration(t)
+
+        # 同步第一步素材列表里对应的那一行（只改数据，不触发“需要重新对齐”）
+        lw = self._src_list(src)
+        if lw is not None and i < lw.count():
+            item = lw.item(i)
+            if not old or os.path.normcase(item.data(Qt.ItemDataRole.UserRole) or "") == os.path.normcase(old):
+                item.setData(Qt.ItemDataRole.UserRole, fn)
+                item.setToolTip(fn)
+                lw._renumber()
+
+        it = self.task_list.item(i)
+        if it is not None:
+            it.setText(f"{i + 1:02d}. {os.path.basename(t['viral'])}")
+            it.setToolTip(f"人物：{t.get('person', '')}\n主视频：{t['viral']}\n时长：{t['duration']:.1f}s")
+        self._tpl_frames = {}
+        self._on_task_select(i)
+        self.save_settings()
+        msg = f"第 {i + 1} 组任务的「{SRC_LABELS[src]}」已替换为：\n{os.path.basename(fn)}"
+        if abs(t.get("duration", 0) - old_dur) > 0.05:
+            msg += f"\n\n任务时长：{old_dur:.1f}s → {t['duration']:.1f}s"
+            pc = t.get("phone_cfg") or getattr(self, "global_phone_cfg", {})
+            if pc.get("time", 0) >= t["duration"]:
+                msg += "\n⚠️ 电话卡片的开始时间已超过新的时长，请调整，否则导出时会跳过电话卡片。"
+        QMessageBox.information(self, "替换完成", msg)
+
+    # ── 卡片预设：记录每个任务套用的预设 ─────────────────────────────────────
+    def _on_editor_preset(self, kind, name):
+        if not self.tasks or self.rb_global.isChecked():
+            return
+        self.tasks[self.cur_task][f"{kind}_preset"] = name
+
+    def _open_batch_table(self):
+        if not self.tasks:
+            QMessageBox.information(self, "提示", "请先完成「对齐时间线」，再批量编辑文案与预设。")
+            return
+        dlg = BatchCardTableDialog(self.tasks, ordered_preset_names("title"), ordered_preset_names("phone"), self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        force = dlg.chk_force.isChecked()
+        applied = {"title": 0, "phone": 0}
+        unknown = []
+        for i, (tt, pt, tp, pp) in enumerate(dlg.values()):
+            if i >= len(self.tasks):
+                break
+            t = self.tasks[i]
+            t["title_text"] = tt
+            t["phone_text"] = pt
+            for kind, name in (("title", tp), ("phone", pp)):
+                key = f"{kind}_preset"
+                if not name:
+                    t.pop(key, None)
+                    continue
+                if name == t.get(key) and f"{kind}_cfg" in t and not force:
+                    continue
+                cfg = preset_cfg_by_name(name)
+                if cfg is None:
+                    unknown.append(f"第 {i + 1} 行：{name}")
+                    continue
+                base = t.get(f"{kind}_cfg") or getattr(self, f"global_{kind}_cfg")
+                cfg["time"] = base.get("time", cfg.get("time", 0))
+                t[f"{kind}_cfg"] = cfg
+                t[key] = name
+                applied[kind] += 1
+        self._on_task_select(self.cur_task)
+        self.save_settings()
+        msg = (f"已更新 {len(self.tasks)} 个任务的文案。\n"
+               f"套用标题卡片预设：{applied['title']} 个任务\n套用电话卡片预设：{applied['phone']} 个任务")
+        if unknown:
+            msg += "\n\n⚠️ 以下预设名称不存在，已忽略：\n" + "\n".join(unknown[:15]) + \
+                   (f"\n……等共 {len(unknown)} 处" if len(unknown) > 15 else "")
+        QMessageBox.information(self, "批量编辑完成", msg)
 
     def _load_adj_widgets(self, *a):
         src = self.cmb_adj_src.currentData()
@@ -2899,9 +3888,135 @@ class DuetVideoUI(QWidget):
         self.lbl_time.setText(f"{self.cur_time():.1f}s / {dur:.1f}s")
 
     def _on_time_change(self, *a):
+        if self._is_playing():
+            self._player.seek(self.cur_time())     # 播放中拖动时间轴 = 跳转
+            self._update_time_label()
+            return
         self._update_time_label()
         self.redraw_preview()
         self._preview_timer.start()
+
+    # ══════════════════════════════════════════════════════════════════════
+    #  ▶ 播放预览
+    # ══════════════════════════════════════════════════════════════════════
+    def _is_playing(self):
+        return self._player is not None and self._player.playing
+
+    def toggle_playback(self):
+        if self._is_playing():
+            self._pause_playback()
+            return
+        if not self.tasks:
+            QMessageBox.information(self, "提示", "请先完成「对齐时间线」后再播放预览。")
+            return
+        t = self.tasks[self.cur_task]
+        srcs = sources_used(self.active_tpl())
+        spd = self.spin_person_speed.value()
+        mute_p = self.chk_mute_person.isChecked()
+        mute_v = self.chk_mute_viral.isChecked()
+        vol = self.slider_volume.value() / 100.0
+        key = (self.cur_task, tuple(srcs), tuple(sorted(self._task_paths(t).items())),
+               round(float(t.get("duration") or 0), 3), spd, mute_p, mute_v, vol)
+        if self._player is None:
+            self._player = DuetPreviewPlayer(self)
+            self._player.frameReady.connect(self._on_play_frame)
+            self._player.finished.connect(self._on_play_finished)
+        if key != self._player_key:
+            try:
+                ok = self._player.load(t, srcs, spd, mute_p, mute_v, vol)
+            except Exception as e:
+                ok = False
+                print("player load failed:", e)
+            if not ok:
+                self._player_key = None
+                QMessageBox.warning(self, "无法播放", "当前任务的视频文件无法打开（可能已被移动或删除），请用「替换视频」重新选择。")
+                return
+            self._player_key = key
+        start = self.cur_time()
+        if start >= float(t.get("duration") or 0) - 0.1:
+            start = 0.0
+        self._play_ov = None
+        self._player.play(start)
+        self.btn_play.setText("⏸ 暂停")
+        self.lbl_preview_tip.setText("▶ 正在播放（预览画质）……拖动时间轴可跳转，点「⏸ 暂停」可停在当前画面继续微调。")
+
+    def _pause_playback(self, snapshot=True):
+        if not self._is_playing():
+            return
+        t = self._player.pause()
+        self.btn_play.setText("▶ 播放")
+        self.lbl_preview_tip.setText("")
+        if not snapshot or not self.tasks:
+            return
+        # 把暂停那一刻的画面放进帧缓存，静态预览直接显示，不用再抽帧
+        tm = round(t, 1)
+        paths = self._task_paths(self.tasks[self.cur_task])
+        for s, img in self._player.images().items():
+            if s in paths and img is not None and not img.isNull():
+                self._frame_cache[(paths[s], tm)] = img
+        v = int(round(t * 10))
+        if self.time_slider.value() != v:
+            self.time_slider.setValue(v)        # 触发静态预览重绘
+        else:
+            self.redraw_preview()
+
+    def _on_play_finished(self):
+        self.btn_play.setText("▶ 播放")
+        self.lbl_preview_tip.setText("播放结束")
+        self.redraw_preview()
+
+    def _build_play_overlays(self, task):
+        tpl = self.active_tpl()
+        split_y = box_layout(tpl)["split_y"]
+        sw, sh = int(round(CANVAS_W * PLAY_SCALE)), int(round(CANVAS_H * PLAY_SCALE))
+
+        def sc(img):
+            if img is None or img.isNull():
+                return None
+            return img.scaled(sw, sh, Qt.AspectRatioMode.IgnoreAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+
+        tc = task.get("title_cfg") or getattr(self, "global_title_cfg", self.title_editor.get_cfg())
+        pc = task.get("phone_cfg") or getattr(self, "global_phone_cfg", self.phone_editor.get_cfg())
+        title = phone = wm = None
+        if self._card_visible(tc, task.get("title_text")):
+            title = sc(render_card_layer(tc, task.get("title_text", ""), split_y, self.cur_task))
+        if self._card_visible(pc, task.get("phone_text")) and pc["time"] < task["duration"]:
+            phone = sc(render_card_layer(pc, task.get("phone_text", ""), split_y, self.cur_task))
+        wm_cfg = getattr(self, "wm_editor", None) and self.wm_editor.get_cfg()
+        if wm_cfg:
+            wm = sc(render_watermark_layer(wm_cfg))
+        return {"title": title, "title_end": min(tc["time"], task["duration"]),
+                "phone": phone, "phone_start": pc["time"], "wm": wm}
+
+    def _on_play_frame(self, frames, t):
+        if not self._is_playing() or not self.tasks:
+            return
+        if self.stack.currentIndex() != 2:
+            self._pause_playback(snapshot=False)
+            return
+        task = self.tasks[self.cur_task]
+        if self._play_ov is None:
+            self._play_ov = self._build_play_overlays(task)
+        o = self._play_ov
+        ovs = []
+        if o["title"] is not None and t <= o["title_end"]:
+            ovs.append(o["title"])
+        if o["phone"] is not None and t >= o["phone_start"]:
+            ovs.append(o["phone"])
+        if o["wm"] is not None:
+            ovs.append(o["wm"])
+        img = compose_preview(self.active_tpl(), frames, None, task.get("adj"), ovs,
+                              show_split=False, scale=PLAY_SCALE)
+        self.preview_canvas.set_image(img)
+        self.time_slider.blockSignals(True)
+        self.time_slider.setValue(int(round(t * 10)))
+        self.time_slider.blockSignals(False)
+        self._update_time_label()
+
+    def hideEvent(self, e):
+        self._pause_playback()
+        super().hideEvent(e)
 
     def _jump_card(self, which):
         if not self.tasks:
@@ -2944,7 +4059,7 @@ class DuetVideoUI(QWidget):
         return seek
 
     def request_preview_frames(self):
-        if not self.tasks or self.stack.currentIndex() != 2:
+        if not self.tasks or self.stack.currentIndex() != 2 or self._is_playing():
             return
         t = self.tasks[self.cur_task]
         tm = round(self.cur_time(), 1)
@@ -2980,6 +4095,9 @@ class DuetVideoUI(QWidget):
 
     def redraw_preview(self, *a):
         if not hasattr(self, "preview_canvas"):
+            return
+        if self._is_playing():
+            self._play_ov = None      # 播放中修改了卡片 / 文案：下一帧重新生成卡片图层
             return
         tpl = self.active_tpl()
         split_y = box_layout(tpl)["split_y"]
@@ -3410,6 +4528,8 @@ class DuetVideoUI(QWidget):
     #  导航
     # ══════════════════════════════════════════════════════════════════════
     def switch_step(self, idx):
+        if idx != 2:
+            self._pause_playback(snapshot=False)
         if idx in (2, 3) and not self.aligned:
             QMessageBox.warning(self, "尚未对齐时间线",
                                 "您尚未完成时间线对齐，将以无视频背景进行效果预览。\n"

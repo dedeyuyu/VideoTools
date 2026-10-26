@@ -171,21 +171,34 @@ def _draw_cell(p: QPainter, num: int, cell: dict, img, adj: dict):
 
 
 def compose_preview(tpl: dict, frames=None, viral_img=None, adj: dict = None,
-                    overlays: list = None, show_split: bool = True, selected: int = -1) -> QImage:
-    """frames: {来源: QImage}。兼容旧调用 compose_preview(tpl, person_img, viral_img, ...)。"""
+                    overlays: list = None, show_split: bool = True, selected: int = -1,
+                    scale: float = 1.0) -> QImage:
+    """frames: {来源: QImage}。兼容旧调用 compose_preview(tpl, person_img, viral_img, ...)。
+    scale < 1 时输出缩小的画面（播放预览用，速度更快）；尺寸与画布同比例的 overlay 会直接贴图。"""
     if not isinstance(frames, dict):
         frames = {"person": frames, "viral": viral_img}
     adj = adj or {}
-    canvas = QImage(CANVAS_W, CANVAS_H, QImage.Format.Format_ARGB32_Premultiplied)
+    cw, ch = max(2, int(round(CANVAS_W * scale))), max(2, int(round(CANVAS_H * scale)))
+    canvas = QImage(cw, ch, QImage.Format.Format_ARGB32_Premultiplied)
     canvas.fill(QColor("#000000"))
     p = QPainter(canvas)
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if abs(scale - 1.0) > 1e-6:
+        p.scale(cw / CANVAS_W, ch / CANVAS_H)
     for num, cell in ordered_cells(tpl):
         _draw_cell(p, num, cell, frames.get(cell.get("src")), adj.get(cell.get("src")))
     for ov in overlays or []:
         if ov is not None and not ov.isNull():
-            p.drawImage(0, 0, ov)
+            if ov.width() == cw and ov.height() == ch and (cw, ch) != (CANVAS_W, CANVAS_H):
+                p.save()
+                p.resetTransform()
+                p.drawImage(0, 0, ov)
+                p.restore()
+            elif (ov.width(), ov.height()) == (CANVAS_W, CANVAS_H):
+                p.drawImage(0, 0, ov)
+            else:
+                p.drawImage(QRectF(0, 0, CANVAS_W, CANVAS_H), ov)
     if show_split:
         pen = QPen(QColor("#F6E05E"), 4, Qt.PenStyle.DashLine)
         p.setPen(pen)

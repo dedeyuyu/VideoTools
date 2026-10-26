@@ -7,7 +7,7 @@ token = os.environ.get("GITHUB_TOKEN") or open(os.path.join(os.path.dirname(os.p
 repo_owner = "dedeyuyu"
 repo_name = "VideoTools"
 
-installer_path = "output_installer/VideoTools_v1.5.15_Setup.exe"
+installer_path = "output_installer/VideoTools_v1.5.16_Setup.exe"
 
 headers = {
     "Authorization": f"token {token}",
@@ -16,9 +16,9 @@ headers = {
 
 # Create release
 release_payload = {
-    "tag_name": "v1.5.15",
-    "name": "VideoTools Release v1.5.15",
-    "body": "### v1.5.15 更新内容\n- **快速合并升级**：新增「1个板块（单池自动分组）」模式，支持按文件名相似度或开头数字自动聚类、顺序/随机合并、多轮输出份数（每轮独立随机顺序）\n- **合拍视频时间线对齐提速**：点击「开始对齐」改为秒级配对与元数据标记，零视频缓存占用，在最终导出时单次滤镜链同步完成延长时间线与合成\n- **合拍视频导出目录自动归档**：每次批量导出自动在指定目录下创建 `合拍&YYYY-MM-DD&序号` 子文件夹，同日多次导出序号自动 +1\n- **新增排版模板**：新增「多格·上2 / 下1」（上方两个分视频、下方一个主视频）模板",
+    "tag_name": "v1.5.16",
+    "name": "VideoTools Release v1.5.16",
+    "body": "### v1.5.16 更新内容\n- **合拍预览支持连续播放**：字幕卡片微调新增「▶ 播放 / ⏸ 暂停」，多路视频同步播放并实时叠加模板、卡片和水印；人物视频按倍速循环（仍为仅标记对齐，无需缓存），播放中可拖动时间轴跳转、边播边改卡片\n- **替换当前任务的视频**：「文案和微调」中可单独替换某组任务的主视频 / 人物视频1~4，文案、卡片、微调保留，时间线标记与素材列表同步更新，导出以替换后为准\n- **卡片预设管理面板**：搜索、多选批量删除、置顶/上移/下移/置底、拖拽排序、重命名、一键应用；内置预设也可删除并可恢复\n- **四列表格批量编辑**：标题文本 / 电话文本 / 标题预设 / 电话预设，每列支持清空与逐行粘贴，也支持从 Excel 直接粘贴多列；预设留空则不更改",
     "draft": False,
     "prerelease": False
 }
@@ -47,7 +47,7 @@ headers_upload = {
 
 with open(installer_path, "rb") as f:
     upload_resp = requests.post(
-        f"{upload_url}?name=VideoTools_v1.5.15_Setup.exe",
+        f"{upload_url}?name=VideoTools_v1.5.16_Setup.exe",
         headers=headers_upload,
         data=f
     )
