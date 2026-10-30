@@ -14,8 +14,10 @@ from PyQt6.QtGui import (QPainterPathStroker, QImage, QPainter, QColor, QFont, Q
                          QPen, QBrush, QPixmap, QIcon, QFontDatabase, QLinearGradient, QPolygonF,
                          QTransform)
 
-from image_worker.duet_worker import (CANVAS_W, CANVAS_H, box_layout, get_install_root,
-                                     tpl_cells, ordered_cells, cell_rect_px, place_in_cell, SRC_LABELS)
+from image_worker.duet_worker import (CANVAS_W, CANVAS_H, REF_W, REF_H, get_canvas_size, box_layout, get_install_root,
+                                     tpl_cells, ordered_cells, cell_rect_px, place_in_cell, SRC_LABELS,
+                                     tpl_bg_color, tpl_divider, divider_rects, divider_lines,
+                                     cell_poly_px, cell_label_rect_px, tpl_diag_ys)
 
 PERSON_COLOR = QColor("#90CDF4")   # 浅蓝：人物
 VIRAL_COLOR = QColor("#FBB6CE")    # 浅粉：主视频
@@ -84,6 +86,7 @@ def default_card(kind: str = "title") -> dict:
         "shadow_alpha": 100,
         "multi_stroke": False, "ms_layers": 2, "ms_step": 6, "ms_feather": 0,
         "ms_colors": "#FFFFFF,#E53E3E",
+        "text_texture": "none",         # none / crackle / grunge_h / grunge_dots
         # 背景
         "bg": False, "bg_fit": False, "bg_shape": "rounded", "bg_color": "#000000", "bg_alpha": 170,
         "bg_radius": 18, "bg_pad_x": 30, "bg_pad_y": 16,
@@ -91,10 +94,12 @@ def default_card(kind: str = "title") -> dict:
         "bg_bottom_w": 0, "bg_bottom_color": "#D90429",
         "bg_shadow": False, "bg_shadow_color": "#000000", "bg_shadow_x": 0, "bg_shadow_y": 8,
         "bg_shadow_blur": 16, "bg_shadow_alpha": 30,
+        "bg_texture": "none",           # none / speckles / grunge_brush / crumpled
         # 结构（引导语 / 副文本 / 双色拼接 / 图标）
         "lead_text": "", "lead_color": "#FFFFFF", "lead_scale": 50, "lead_inline": False,
         "sub_text": "", "sub_color": "#FFFFFF", "sub_scale": 40,
         "sub_enabled": False, "sub_size": 40, "sub_hl_color": "#FFD400", "sub_stroke": True, "sub_stroke_color": "#000000", "sub_stroke_width": 6,
+        "sub_text_texture": "none", "sub_bg_texture": "none",
         "split": "none", "split_color2": "#FFFFFF", "split_alpha2": 255,
         "icon": "none",
         "underline": False, "underline_color": "#25D366", "underline_w": 4,
@@ -123,19 +128,30 @@ def default_watermark() -> dict:
 
 def template_icon(tpl: dict, w: int = 54, h: int = 96) -> QIcon:
     pm = QPixmap(w, h)
-    pm.fill(QColor("#2D3748"))
+    pm.fill(QColor(tpl_bg_color(tpl)) if tpl.get("bg_color") else QColor("#2D3748"))
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    sx, sy = w / CANVAS_W, h / CANVAS_H
+    canv_w, canv_h = get_canvas_size(tpl)
+    sx, sy = w / canv_w, h / canv_h
     f = QFont("Microsoft YaHei")
     f.setBold(True)
     for num, cell in ordered_cells(tpl):
-        x, y, cw, ch = cell_rect_px(cell)
-        r = QRectF(x * sx, y * sy, cw * sx, ch * sy)
-        p.fillRect(r, SRC_COLORS.get(cell.get("src"), QColor("#A0AEC0")))
-        p.setPen(QPen(QColor("#FFFFFF"), 1.5 if cell.get("pip") else 1))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(r.adjusted(0.5, 0.5, -0.5, -0.5))
+        poly_pts = cell_poly_px(cell, tpl)
+        col = SRC_COLORS.get(cell.get("src"), QColor("#A0AEC0"))
+        if poly_pts:
+            poly = QPolygonF([QPointF(px * sx, py * sy) for px, py in poly_pts])
+            p.setPen(QPen(QColor("#FFFFFF"), 1.2))
+            p.setBrush(col)
+            p.drawPolygon(poly)
+            lx, ly, lw, lh = cell_label_rect_px(cell, tpl)
+            r = QRectF(lx * sx, ly * sy, lw * sx, lh * sy)
+        else:
+            x, y, cw, ch = cell_rect_px(cell, tpl)
+            r = QRectF(x * sx, y * sy, cw * sx, ch * sy)
+            p.fillRect(r, col)
+            p.setPen(QPen(QColor("#FFFFFF"), 1.5 if cell.get("pip") else 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r.adjusted(0.5, 0.5, -0.5, -0.5))
         f.setPixelSize(max(6, int(min(r.width(), r.height()) * 0.55)))
         p.setFont(f)
         p.setPen(QColor("#1A202C"))
@@ -146,28 +162,48 @@ def template_icon(tpl: dict, w: int = 54, h: int = 96) -> QIcon:
 
 # ── 画面合成（预览用） ─────────────────────────────────────────────────────────
 
-def _draw_cell(p: QPainter, num: int, cell: dict, img, adj: dict):
-    x, y, w, h = cell_rect_px(cell)
+def _draw_cell(p: QPainter, num: int, cell: dict, img, adj: dict, tpl: dict = None):
+    x, y, w, h = cell_rect_px(cell, tpl)
+    poly_pts = cell_poly_px(cell, tpl)
     b = int(cell.get("border", 0) or 0)
-    if b > 0:
+    if b > 0 and not poly_pts:
         p.fillRect(x - b, y - b, w + 2 * b, h + 2 * b, QColor("#FFFFFF"))
     p.save()
-    p.setClipRect(x, y, w, h)
+    if poly_pts:
+        clip_path = QPainterPath()
+        clip_path.addPolygon(QPolygonF([QPointF(px, py) for px, py in poly_pts]))
+        clip_path.closeSubpath()
+        p.setClipPath(clip_path)
+    else:
+        p.setClipRect(x, y, w, h)
     src = cell.get("src", "")
     if img is None or img.isNull():
         p.fillRect(x, y, w, h, SRC_COLORS.get(src, QColor("#A0AEC0")))
+        lx, ly, lw, lh = cell_label_rect_px(cell, tpl) if poly_pts else (x, y, w, h)
         f = QFont("Microsoft YaHei")
         f.setBold(True)
-        f.setPixelSize(max(18, min(56, int(min(w, h) * 0.12))))
+        f.setPixelSize(max(18, min(56, int(min(w, h) * 0.11))))
         p.setFont(f)
         p.setPen(QColor("#1A202C"))
-        p.drawText(QRectF(x, y, w, h), Qt.AlignmentFlag.AlignCenter,
+        p.drawText(QRectF(lx, ly, lw, lh), Qt.AlignmentFlag.AlignCenter,
                    f"{num + 1}\n{SRC_LABELS.get(src, src)}")
     else:
         p.fillRect(x, y, w, h, QColor("#000000"))
-        sw, sh, ox, oy = place_in_cell(img.width(), img.height(), w, h, cell, adj)
+        sw, sh, ox, oy = place_in_cell(img.width(), img.height(), w, h, cell, adj, tpl)
         p.drawImage(QRectF(x + ox, y + oy, sw, sh), img)
     p.restore()
+
+
+def _paint_dividers(p: QPainter, div_rects: list, div_lines: list, div_w: int, div_color: QColor):
+    for x, y, w, h in div_rects:
+        p.fillRect(QRectF(x, y, w, h), div_color)
+    if div_lines and div_w > 0:
+        pen = QPen(div_color, float(div_w), Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap, Qt.PenJoinStyle.MiterJoin)
+        p.save()
+        p.setPen(pen)
+        for x1, y1, x2, y2 in div_lines:
+            p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        p.restore()
 
 
 def compose_preview(tpl: dict, frames=None, viral_img=None, adj: dict = None,
@@ -178,37 +214,57 @@ def compose_preview(tpl: dict, frames=None, viral_img=None, adj: dict = None,
     if not isinstance(frames, dict):
         frames = {"person": frames, "viral": viral_img}
     adj = adj or {}
-    cw, ch = max(2, int(round(CANVAS_W * scale))), max(2, int(round(CANVAS_H * scale)))
+    canv_w, canv_h = get_canvas_size(tpl)
+    cw, ch = max(2, int(round(canv_w * scale))), max(2, int(round(canv_h * scale)))
     canvas = QImage(cw, ch, QImage.Format.Format_ARGB32_Premultiplied)
-    canvas.fill(QColor("#000000"))
+    canvas.fill(QColor(tpl_bg_color(tpl)))
     p = QPainter(canvas)
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     if abs(scale - 1.0) > 1e-6:
-        p.scale(cw / CANVAS_W, ch / CANVAS_H)
+        p.scale(cw / canv_w, ch / canv_h)
+    div_rects = divider_rects(tpl)
+    div_lines = divider_lines(tpl)
+    div_w, div_col_hex = tpl_divider(tpl)
+    div_color = QColor(div_col_hex)
+    div_done = (not div_rects) and (not div_lines)
     for num, cell in ordered_cells(tpl):
-        _draw_cell(p, num, cell, frames.get(cell.get("src")), adj.get(cell.get("src")))
+        if not div_done and cell.get("pip"):
+            _paint_dividers(p, div_rects, div_lines, div_w, div_color)
+            div_done = True
+        _draw_cell(p, num, cell, frames.get(cell.get("src")), adj.get(cell.get("src")), tpl)
+    if not div_done:
+        _paint_dividers(p, div_rects, div_lines, div_w, div_color)
     for ov in overlays or []:
         if ov is not None and not ov.isNull():
-            if ov.width() == cw and ov.height() == ch and (cw, ch) != (CANVAS_W, CANVAS_H):
+            if ov.width() == cw and ov.height() == ch and (cw, ch) != (canv_w, canv_h):
                 p.save()
                 p.resetTransform()
                 p.drawImage(0, 0, ov)
                 p.restore()
-            elif (ov.width(), ov.height()) == (CANVAS_W, CANVAS_H):
+            elif (ov.width(), ov.height()) == (canv_w, canv_h):
                 p.drawImage(0, 0, ov)
             else:
-                p.drawImage(QRectF(0, 0, CANVAS_W, CANVAS_H), ov)
+                p.drawImage(QRectF(0, 0, canv_w, canv_h), ov)
     if show_split:
         pen = QPen(QColor("#F6E05E"), 4, Qt.PenStyle.DashLine)
         p.setPen(pen)
-        sy = box_layout(tpl)["split_y"]
-        p.drawLine(0, sy, CANVAS_W, sy)
+        diag = tpl_diag_ys(tpl_cells(tpl))
+        if diag is not None:
+            p.drawLine(QPointF(0, diag[0] * canv_h), QPointF(canv_w, diag[1] * canv_h))
+        else:
+            sy = box_layout(tpl)["split_y"]
+            p.drawLine(0, sy, canv_w, sy)
     if 0 <= selected < len(tpl_cells(tpl)):
-        x, y, w, h = cell_rect_px(tpl_cells(tpl)[selected])
-        p.setPen(QPen(QColor("#00E5FF"), 8))
+        sel_cell = tpl_cells(tpl)[selected]
+        poly_pts = cell_poly_px(sel_cell, tpl)
+        p.setPen(QPen(QColor("#00E5FF"), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(x + 4, y + 4, w - 8, h - 8)
+        if poly_pts:
+            p.drawPolygon(QPolygonF([QPointF(px, py) for px, py in poly_pts]))
+        else:
+            x, y, w, h = cell_rect_px(sel_cell, tpl)
+            p.drawRect(x + 4, y + 4, w - 8, h - 8)
     p.end()
     return canvas
 
@@ -326,21 +382,30 @@ class _Line:
         self.y = 0.0     # 行顶部
 
 
-def card_center(cfg: dict, split_y: int, task_index: int = 0) -> tuple:
+def card_center(cfg: dict, split_y: int, task_index: int = 0, cw: int = None, ch: int = None) -> tuple:
+    if cw is None or ch is None:
+        cw, ch = get_canvas_size()
     if cfg.get("snap_split"):
-        cx, cy = CANVAS_W / 2, float(split_y)
+        cx, cy = cw / 2.0, float(split_y)
     else:
-        cx, cy = float(cfg.get("pos_x", 540)), float(cfg.get("pos_y", 960))
+        ref = cfg.get("pos_ref_size")
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh_ref = float(ref[0]), float(ref[1])
+        else:
+            rw, rh_ref = float(REF_W), float(REF_H)
+        cx = float(cfg.get("pos_x", 540)) * (cw / rw)
+        cy = float(cfg.get("pos_y", 960)) * (ch / rh_ref)
     rh = float(cfg.get("rand_height", 0))
     if rh:
         rnd = random.Random(task_index * 7919 + 13)
-        cy += rnd.uniform(-rh, rh) / 100.0 * CANVAS_H
+        cy += rnd.uniform(-rh, rh) / 100.0 * ch
     return cx, cy
 
 
 def render_card_layer(cfg: dict, text: str, split_y: int, task_index: int = 0,
-                      draw_guides: bool = False) -> QImage:
-    img = QImage(CANVAS_W, CANVAS_H, QImage.Format.Format_ARGB32_Premultiplied)
+                      draw_guides: bool = False, canvas_wh: tuple = None) -> QImage:
+    cw, ch = canvas_wh if (canvas_wh and len(canvas_wh) == 2) else get_canvas_size()
+    img = QImage(cw, ch, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
     if not cfg.get("enabled", True):
         return img
@@ -348,7 +413,7 @@ def render_card_layer(cfg: dict, text: str, split_y: int, task_index: int = 0,
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-    cx, cy = card_center(cfg, split_y, task_index)
+    cx, cy = card_center(cfg, split_y, task_index, cw, ch)
     rot = float(cfg.get("rotation", 0))
     p.translate(cx, cy)
     if rot:
@@ -357,7 +422,7 @@ def render_card_layer(cfg: dict, text: str, split_y: int, task_index: int = 0,
     if cfg.get("mode") == "image":
         _draw_image_card(p, cfg)
     else:
-        _draw_text_card(p, cfg, text or "", cx)
+        _draw_text_card(p, cfg, text or "", cx, cw)
 
     if draw_guides and cfg.get("show_range"):
         w = float(cfg.get("width", 960))
@@ -419,6 +484,75 @@ def _draw_arrow(p: QPainter, c: QPointF, size: float, color: QColor):
 
 # ---- 背景形状 ----
 
+def _brush_banner_path(rect: QRectF, seed: int = 7, feather: bool = False) -> QPainterPath:
+    """水平笔刷涂抹条：上下边缘微起伏，左右两端呈现横向刷毛锯齿 / 撕裂笔触。"""
+    rnd = random.Random(seed)
+    pts = []
+    l, r, t, b = rect.left(), rect.right(), rect.top(), rect.bottom()
+    w, h = max(10.0, rect.width()), max(10.0, rect.height())
+    steps_x = max(20, int(w / 22))
+    teeth = max(11, int(h / 5.2))
+    end_amp = min(14.0, max(7.0, h * (0.13 if feather else 0.16)))
+
+    # 顶部边缘（左 -> 右）
+    cur_dy = 0.0
+    for i in range(steps_x + 1):
+        u = i / steps_x
+        if rnd.random() < 0.22:
+            cur_dy = rnd.uniform(-1.5, 1.5)
+        y = t + cur_dy + rnd.uniform(-0.5, 0.5)
+        pts.append(QPointF(l + w * u, y))
+
+    # 右侧刷毛锯齿（上 -> 下）
+    for i in range(teeth):
+        u0 = i / teeth
+        u1 = (i + 1) / teeth
+        ym = t + h * (u0 + u1) * 0.5
+        taper = 0.45 + 0.55 * (1.0 - abs(2.0 * (u0 + 0.5 / teeth) - 1.0) ** 1.8)
+        kind = rnd.random()
+        if kind < 0.38:
+            dx = rnd.uniform(0.3, 1.0) * end_amp * taper
+        elif kind < 0.72:
+            dx = rnd.uniform(-0.2, 0.3) * end_amp * taper
+        else:
+            dx = -rnd.uniform(0.25, 0.75) * end_amp * taper
+        pts.append(QPointF(r + dx, t + h * u0))
+        pts.append(QPointF(r + dx + rnd.uniform(-1.5, 1.5), ym))
+        pts.append(QPointF(r + dx * 0.6, t + h * u1))
+
+    # 底部边缘（右 -> 左）
+    cur_dy = 0.0
+    for i in range(steps_x, -1, -1):
+        u = i / steps_x
+        if rnd.random() < 0.22:
+            cur_dy = rnd.uniform(-1.5, 1.5)
+        y = b + cur_dy + rnd.uniform(-0.5, 0.5)
+        pts.append(QPointF(l + w * u, y))
+
+    # 左侧刷毛锯齿（下 -> 上）
+    for i in range(teeth - 1, -1, -1):
+        u0 = i / teeth
+        u1 = (i + 1) / teeth
+        ym = t + h * (u0 + u1) * 0.5
+        taper = 0.45 + 0.55 * (1.0 - abs(2.0 * (u0 + 0.5 / teeth) - 1.0) ** 1.8)
+        kind = rnd.random()
+        if kind < 0.38:
+            dx = rnd.uniform(0.3, 1.0) * end_amp * taper
+        elif kind < 0.72:
+            dx = rnd.uniform(-0.2, 0.3) * end_amp * taper
+        else:
+            dx = -rnd.uniform(0.25, 0.75) * end_amp * taper
+        pts.append(QPointF(l - dx * 0.6, t + h * u1))
+        pts.append(QPointF(l - dx + rnd.uniform(-1.5, 1.5), ym))
+        pts.append(QPointF(l - dx, t + h * u0))
+
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.WindingFill)
+    path.addPolygon(QPolygonF(pts))
+    path.closeSubpath()
+    return path
+
+
 def _shape_path(shape: str, rect: QRectF, radius: float, seed: int = 7) -> QPainterPath:
     path = QPainterPath()
     if shape == "pill":
@@ -426,6 +560,10 @@ def _shape_path(shape: str, rect: QRectF, radius: float, seed: int = 7) -> QPain
         path.addRoundedRect(rect, rr, rr)
     elif shape in ("rect", "banner", "gradient"):
         path.addRect(rect)
+    elif shape == "brush":
+        return _brush_banner_path(rect, seed=seed, feather=False)
+    elif shape == "brush_feather":
+        return _brush_banner_path(rect, seed=seed, feather=True)
     elif shape == "notch":
         c = min(rect.height() * 0.32, 30.0)
         path.addPolygon(QPolygonF([
@@ -485,13 +623,265 @@ def _shape_path(shape: str, rect: QRectF, radius: float, seed: int = 7) -> QPain
     return path
 
 
+def _draw_bg_texture(p: QPainter, rect: QRectF, clip_path: QPainterPath, tex: str,
+                     base_color: QColor, seed: int = 11):
+    """在底框内绘制做旧纹理：speckles(斑驳噪点+笔刷边线) / grunge_brush(干笔刷飞白泼墨) / crumpled(折纸褶皱+暗角)。"""
+    if not tex or tex == "none":
+        return
+    rnd = random.Random(seed)
+    l, r, t, b = rect.left(), rect.right(), rect.top(), rect.bottom()
+    w, h = max(10.0, rect.width()), max(10.0, rect.height())
+    is_light = base_color.lightness() > 145
+
+    if tex == "speckles":
+        p.save()
+        p.setClipPath(clip_path)
+        # 上下边缘笔刷刻痕细线（如图1/图3蓝色底条上下边沿的断续笔触沟槽线）
+        groove_dark = QColor(0, 0, 0, 125)
+        groove_light = QColor(255, 255, 255, 70)
+        for edge_y, sign in ((t + 4.5, 1.0), (b - 4.5, -1.0)):
+            x = l - 10
+            while x < r + 10:
+                seg = rnd.uniform(28, 95)
+                if rnd.random() < 0.82:
+                    p.setPen(QPen(groove_dark, rnd.uniform(1.6, 2.6), Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+                    p.drawLine(QPointF(x, edge_y + rnd.uniform(-0.8, 0.8)),
+                               QPointF(x + seg, edge_y + rnd.uniform(-0.8, 0.8)))
+                    if rnd.random() < 0.55:
+                        p.setPen(QPen(groove_light, 1.1))
+                        p.drawLine(QPointF(x + 4, edge_y + sign * 2.2),
+                                   QPointF(x + seg * 0.7, edge_y + sign * 2.2))
+                x += seg + rnd.uniform(6, 22)
+
+        # 斑驳白点与细微划痕
+        n_dots = max(60, int(w * h / 520))
+        for _ in range(n_dots):
+            px = rnd.uniform(l - 12, r + 12)
+            py = rnd.uniform(t, b)
+            alpha = rnd.randint(55, 145)
+            col = QColor(220, 238, 255, alpha) if not is_light else QColor(20, 20, 20, alpha)
+            if rnd.random() < 0.35:
+                # 细小斜划痕
+                ang_dx = rnd.uniform(-5.5, 5.5)
+                ang_dy = rnd.uniform(-5.5, 5.5)
+                p.setPen(QPen(col, rnd.uniform(1.0, 1.8)))
+                p.drawLine(QPointF(px, py), QPointF(px + ang_dx, py + ang_dy))
+            else:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(col)
+                sz = rnd.uniform(1.2, 3.2)
+                p.drawEllipse(QPointF(px, py), sz, sz * rnd.uniform(0.6, 1.3))
+        p.restore()
+
+    elif tex == "grunge_brush":
+        # 外侧飞白毛刺（不裁剪，让左右两端有干笔刷飞丝与飞沫）
+        p.save()
+        for side_x, dir_sign in ((l, -1.0), (r, 1.0)):
+            for _ in range(32):
+                sy = rnd.uniform(t + 2, b - 2)
+                len_out = rnd.uniform(4, 18)
+                len_in = rnd.uniform(6, 24)
+                c_out = QColor(base_color.red(), base_color.green(), base_color.blue(), rnd.randint(110, 235))
+                p.setPen(QPen(c_out, rnd.uniform(1.1, 2.4), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(QPointF(side_x - dir_sign * len_in, sy),
+                           QPointF(side_x + dir_sign * len_out, sy + rnd.uniform(-0.7, 0.7)))
+                if rnd.random() < 0.45:
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(c_out)
+                    r_dot = rnd.uniform(1.0, 2.2)
+                    p.drawEllipse(QPointF(side_x + dir_sign * (len_out + rnd.uniform(2, 9)),
+                                          sy + rnd.uniform(-1.5, 1.5)), r_dot, r_dot)
+        p.restore()
+
+        p.save()
+        p.setClipPath(clip_path)
+        if is_light:
+            # 浅色底（如图3白底）：仅在左右两端留白区与上下极窄边缘绘制干笔刷飞白刮痕，保持中间文字区洁白清晰
+            edge_reach = min(34.0, w * 0.065)
+            for side_x, dir_in in ((l - 10, 1.0), (r + 10, -1.0)):
+                for _ in range(55):
+                    sy = rnd.uniform(t, b)
+                    reach = rnd.uniform(6, edge_reach)
+                    x0 = side_x + dir_in * rnd.uniform(0, 8)
+                    x1 = x0 + dir_in * reach
+                    ink = QColor(14, 14, 14, rnd.randint(95, 215))
+                    p.setPen(QPen(ink, rnd.uniform(0.9, 2.1), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    p.drawLine(QPointF(x0, sy), QPointF(x1, sy + rnd.uniform(-0.6, 0.6)))
+            # 上下边缘极窄干刷斑驳（不侵入中间字身）
+            for edge_y, dir_in in ((t, 1.0), (b, -1.0)):
+                for _ in range(70):
+                    sx = rnd.uniform(l, r)
+                    sy = edge_y + dir_in * rnd.uniform(0.3, 4.8)
+                    seg = rnd.uniform(5, 28)
+                    ink = QColor(15, 15, 15, rnd.randint(80, 195))
+                    p.setPen(QPen(ink, rnd.uniform(0.8, 1.8)))
+                    p.drawLine(QPointF(sx, sy), QPointF(sx + seg, sy + rnd.uniform(-0.5, 0.5)))
+            # 边缘细碎泼墨颗粒
+            for _ in range(130):
+                dx = rnd.uniform(l, r)
+                dy = rnd.uniform(t, b)
+                in_lr = (dx - l) < edge_reach * 1.15 or (r - dx) < edge_reach * 1.15
+                in_tb = (dy - t) < 6.5 or (b - dy) < 6.5
+                if not (in_lr or in_tb) and rnd.random() < 0.88:
+                    continue
+                ink = QColor(15, 15, 15, rnd.randint(80, 195))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(ink)
+                sz = rnd.uniform(0.9, 2.2)
+                p.drawEllipse(QPointF(dx, dy), sz * rnd.uniform(0.8, 1.8), sz)
+        else:
+            # 深色底（如图2黑底）：细腻横向干笔刷拉丝纹理 + 上下边沿微斑驳
+            for _ in range(75):
+                sx = rnd.uniform(l - 10, r - 20)
+                sy = rnd.uniform(t + 2, b - 2)
+                seg = rnd.uniform(25, 120)
+                col = QColor(255, 255, 255, rnd.randint(10, 28))
+                p.setPen(QPen(col, rnd.uniform(0.8, 1.6)))
+                p.drawLine(QPointF(sx, sy), QPointF(min(r + 10, sx + seg), sy + rnd.uniform(-0.5, 0.5)))
+            for edge_y in (t + 3.0, b - 3.0):
+                x = l
+                while x < r:
+                    seg = rnd.uniform(20, 65)
+                    p.setPen(QPen(QColor(255, 255, 255, rnd.randint(20, 48)), rnd.uniform(0.9, 1.5)))
+                    p.drawLine(QPointF(x, edge_y), QPointF(x + seg, edge_y + rnd.uniform(-0.5, 0.5)))
+                    x += seg + rnd.uniform(8, 24)
+        p.restore()
+
+    elif tex == "crumpled":
+        # 如图2下排冰蓝底：柔和折纸多边形明暗褶皱 + 左右边缘柔和暗角羽化 + 顶部投影
+        p.save()
+        p.setClipPath(clip_path)
+        cols = max(14, int(w / 42))
+        rows = 4
+        cw, rh = w / cols, h / rows
+        grid = []
+        for r_i in range(rows + 1):
+            row_pts = []
+            for c_i in range(cols + 1):
+                jx = rnd.uniform(-cw * 0.26, cw * 0.26) if 0 < c_i < cols else 0.0
+                jy = rnd.uniform(-rh * 0.26, rh * 0.26) if 0 < r_i < rows else 0.0
+                row_pts.append(QPointF(l + c_i * cw + jx, t + r_i * rh + jy))
+            grid.append(row_pts)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        for r_i in range(rows):
+            for c_i in range(cols):
+                p00, p10 = grid[r_i][c_i], grid[r_i][c_i + 1]
+                p01, p11 = grid[r_i + 1][c_i], grid[r_i + 1][c_i + 1]
+                cx_norm = (c_i + 0.5) / cols
+                edge_fade = min(1.0, min(cx_norm, 1.0 - cx_norm) / 0.16) ** 1.4
+                for tri in ((p00, p10, p11), (p00, p11, p01)):
+                    shade = rnd.uniform(-1.0, 1.0)
+                    if shade >= 0:
+                        fc = QColor(255, 255, 255, int(shade * 26 * edge_fade))
+                    else:
+                        fc = QColor(0, 18, 40, int(-shade * 30 * edge_fade))
+                    p.setBrush(fc)
+                    p.drawPolygon(QPolygonF(list(tri)))
+
+        # 顶部交界阴影
+        g_top = QLinearGradient(QPointF(0, t), QPointF(0, t + min(14.0, h * 0.2)))
+        g_top.setColorAt(0.0, QColor(0, 0, 0, 95))
+        g_top.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.fillRect(QRectF(l + w * 0.08, t, w * 0.84, min(14.0, h * 0.2)), QBrush(g_top))
+        p.restore()
+
+
+def _draw_text_texture(p: QPainter, path: QPainterPath, tex: str, text_color: str, seed: int = 23):
+    """在文字笔画内部绘制做旧纹理：crackle(斜向裂纹刮痕) / grunge_h(横向干笔刷斑驳) / grunge_dots(复古颗粒)。"""
+    if not tex or tex == "none" or path.isEmpty():
+        return
+    rnd = random.Random(seed)
+    b = path.boundingRect()
+    l, r, t, bot = b.left(), b.right(), b.top(), b.bottom()
+    w, h = max(10.0, b.width()), max(10.0, b.height())
+    tc = QColor(text_color or "#FFFFFF")
+    is_light_text = tc.lightness() > 125
+
+    p.save()
+    p.setClipPath(path)
+
+    if tex == "crackle":
+        # 如图1/图3白字内部：纤细锐利的深色斜向裂纹/分叉细刮痕 + 微小剥落点（保持白字主体干净醒目）
+        crack_col = QColor(10, 18, 28, 175) if is_light_text else QColor(255, 255, 255, 175)
+        n_cracks = max(15, int(w / 24))
+        for i in range(n_cracks):
+            cx = l + (i + rnd.uniform(0.15, 0.85)) * (w / n_cracks)
+            cy = rnd.uniform(t + h * 0.12, bot - h * 0.12)
+            dir_x = rnd.choice((-1.0, 1.0)) * rnd.uniform(0.55, 0.9)
+            dir_y = rnd.choice((-1.0, 1.0)) * rnd.uniform(0.75, 1.1)
+            segs = rnd.randint(2, 4)
+            pts = [QPointF(cx, cy)]
+            px_cur, py_cur = cx, cy
+            for _ in range(segs):
+                step = rnd.uniform(5.5, 11.5)
+                px_cur += dir_x * step + rnd.uniform(-1.8, 1.8)
+                py_cur += dir_y * step + rnd.uniform(-1.8, 1.8)
+                pts.append(QPointF(px_cur, py_cur))
+            pen = QPen(crack_col, rnd.uniform(1.0, 1.65), Qt.PenStyle.SolidLine,
+                       Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.drawPolyline(QPolygonF(pts))
+            if len(pts) >= 3 and rnd.random() < 0.5:
+                bp = pts[1]
+                bx = bp.x() - dir_x * rnd.uniform(4.5, 9.5) + rnd.uniform(-2.5, 2.5)
+                by = bp.y() + dir_y * rnd.uniform(4.5, 9.5) + rnd.uniform(-2.5, 2.5)
+                p.setPen(QPen(crack_col, rnd.uniform(0.8, 1.25), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                p.drawLine(bp, QPointF(bx, by))
+
+        n_chips = max(45, int(w * h / 650))
+        p.setPen(Qt.PenStyle.NoPen)
+        for _ in range(n_chips):
+            p.setBrush(crack_col)
+            rx = rnd.uniform(l, r)
+            ry = rnd.uniform(t, bot)
+            sz = rnd.uniform(0.8, 1.8)
+            p.drawEllipse(QPointF(rx, ry), sz, sz * rnd.uniform(0.6, 1.4))
+
+    elif tex == "grunge_h":
+        # 如图2首行白字 / 图3首行黑字：适度细腻的横向干笔刷刮擦飞白条纹与斑驳颗粒
+        n_streaks = max(55, int(w * h / 460))
+        for _ in range(n_streaks):
+            sx = rnd.uniform(l - 6, r)
+            sy = rnd.uniform(t, bot)
+            slen = rnd.uniform(5.0, 24.0)
+            alpha = rnd.randint(95, 175) if not is_light_text else rnd.randint(80, 150)
+            scol = QColor(255, 255, 255, alpha) if not is_light_text else QColor(18, 18, 18, alpha)
+            p.setPen(QPen(scol, rnd.uniform(0.8, 1.5), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(sx, sy), QPointF(sx + slen, sy + rnd.uniform(-0.5, 0.5)))
+        n_dots = max(75, int(w * h / 380))
+        p.setPen(Qt.PenStyle.NoPen)
+        for _ in range(n_dots):
+            alpha = rnd.randint(90, 175) if not is_light_text else rnd.randint(80, 150)
+            scol = QColor(255, 255, 255, alpha) if not is_light_text else QColor(18, 18, 18, alpha)
+            p.setBrush(scol)
+            rx, ry = rnd.uniform(l, r), rnd.uniform(t, bot)
+            sz = rnd.uniform(0.8, 1.8)
+            p.drawEllipse(QPointF(rx, ry), sz * rnd.uniform(1.0, 2.0), sz)
+
+    elif tex == "grunge_dots":
+        n_dots = max(90, int(w * h / 360))
+        p.setPen(Qt.PenStyle.NoPen)
+        for _ in range(n_dots):
+            alpha = rnd.randint(95, 185)
+            scol = QColor(15, 15, 15, alpha) if is_light_text else QColor(255, 255, 255, alpha)
+            p.setBrush(scol)
+            rx, ry = rnd.uniform(l, r), rnd.uniform(t, bot)
+            sz = rnd.uniform(0.9, 2.2)
+            p.drawEllipse(QPointF(rx, ry), sz, sz * rnd.uniform(0.7, 1.4))
+
+    p.restore()
+
+
 def _alpha_color(hexc: str, alpha: int) -> QColor:
     c = QColor(hexc)
     c.setAlpha(max(0, min(255, int(alpha))))
     return c
 
 
-def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
+def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float, canv_w: int = None):
+    if canv_w is None:
+        canv_w = get_canvas_size()[0]
     text = text.replace("\r", "")
     upper = bool(cfg.get("uppercase"))
     lead = (cfg.get("lead_text") or "").replace("\r", "")
@@ -535,8 +925,27 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
         do_wrap = bool(cfg.get("wrap", True))
         
         if kind == "main" and sub_enabled:
-            # Wrap first line using main_font
             fm_main_local = QFontMetricsF(font)
+            s_clean = s.strip()
+            # 双色上下分离且未手动换行时，自动按约 54% 处均衡拆分为上下两行（避免首行极长、次行仅剩一词）
+            if split == "vertical" and "\n" not in s_clean and do_wrap:
+                words = list(re.finditer(r"\S+", s_clean))
+                if len(words) >= 2:
+                    target = len(s_clean) * 0.54
+                    best_end = None
+                    best_dist = 1e9
+                    for m in words[:-1]:
+                        end_idx = m.end()
+                        if fm_main_local.horizontalAdvance(s_clean[:end_idx]) <= avail * 1.05:
+                            d = abs(end_idx - target)
+                            if d < best_dist:
+                                best_dist = d
+                                best_end = end_idx
+                    if best_end is not None:
+                        s = s_clean[:best_end] + "\n" + s_clean[best_end:].lstrip()
+                        mask = _hl_mask(s, cfg)
+
+            # Wrap first line using main_font
             wrap_indices = _wrap(s, fm_main_local, avail, do_wrap)
             if not wrap_indices: return out
             
@@ -575,7 +984,7 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
         return w, y - top
 
     # 组织分区：每个分区 = {'lines': [...], 'icon': bool, 'arrow': bool}
-    if sub_enabled and split == "vertical":
+    if (sub_enabled or not lead_lines) and split == "vertical":
         # First line goes to section 0, the rest to section 1
         line1 = [main_lines[0]] if main_lines else []
         rest = main_lines[1:] if len(main_lines) > 1 else []
@@ -634,7 +1043,7 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
 
     shape = cfg.get("bg_shape", "rounded")
     if use_bg and shape in ("banner", "gradient"):
-        card = QRectF(-cx, card.top(), CANVAS_W, card.height())
+        card = QRectF(-cx, card.top(), canv_w, card.height())
         if shape == "gradient":
             card = card.adjusted(0, -card.height() * 1.2, 0, py)
         for s in sections:
@@ -643,7 +1052,7 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
 
     # 放置每个分区内的文字与图标
     icon_spots = []
-    for s in sections:
+    for s_idx, s in enumerate(sections):
         r = s["rect"]
         content_left = r.center().x() - s["cw"] / 2
         top = r.center().y() - s["ch"] / 2
@@ -660,11 +1069,13 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
         if il is not None:
             il.x = content_left
             il.y = ty + (s["lines"][0].h - il.h) / 2 if s["lines"] else ty
+            il._sec_idx = s_idx
             content_left += il.w + gap
             tw -= il.w + gap
         stack(s["lines"], ty)
         for ln in s["lines"]:
             ln.x = content_left + (tw - ln.w) / 2
+            ln._sec_idx = s_idx
         s["top"] = top
 
     all_lines = []
@@ -673,81 +1084,33 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
             all_lines.append(s["inline_lead"])
         all_lines.extend(s["lines"])
 
-    # ── 1) 背景 ──
-    if use_bg:
-        radius = float(cfg.get("bg_radius", 18))
-        fit = bool(cfg.get("bg_fit", True)) and split == "none" and not lead_lines and not sub_lines \
-            and icon == "none" and shape in ("rounded", "rect", "pill")
-        if shape == "hug":
-            card_path = QPainterPath()
-            for i, ln in enumerate(all_lines):
-                y1 = ln.y
-                y2 = ln.y + ln.h
-                if i > 0:
-                    y1 = min(y1, all_lines[i-1].y + all_lines[i-1].h)
-                if i < len(all_lines) - 1:
-                    y2 = max(y2, all_lines[i+1].y)
-                card_path.addRect(QRectF(ln.x, y1, ln.w, y2 - y1))
-            
-            card_path = card_path.simplified()
-            if not card_path.isEmpty():
-                stroker = QPainterPathStroker()
-                # The radius of the stroke determines the padding
-                stroker.setWidth(max(px, py) * 2 if max(px, py) > 0 else 20)
-                stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
-                outline = stroker.createStroke(card_path)
-                card_path = card_path.united(outline)
-                card_path = card_path.simplified()
-        elif fit:
-            card_path = QPainterPath()
-            for ln in all_lines:
-                lr = QRectF(ln.x - px, ln.y - py, ln.w + 2 * px, ln.h + 2 * py)
-                card_path.addPath(_shape_path(shape, lr, radius))
-            card_path = card_path.simplified()
-        else:
-            card_path = _shape_path(shape, card, radius)
+    # 笔刷涂抹条（brush / brush_feather）：按字高紧凑居中排版，每行拥有独立贴合底条
+    is_brush_shape = use_bg and shape in ("brush", "brush_feather") and icon == "none"
+    if is_brush_shape and all_lines:
+        line_caps = []
+        for ln in all_lines:
+            ch_val = ln.fm.capHeight() if ln.fm.capHeight() > 0 else ln.fm.ascent() * 0.74
+            if re.search(r"[\u4e00-\u9fff]", ln.text):
+                ch_val = max(ch_val, ln.fm.ascent() * 0.82)
+            line_caps.append(ch_val)
+        b_heights = [max(16.0, ch_val + 2 * py) for ch_val in line_caps]
+        total_bh = sum(b_heights) + ls * max(0, len(all_lines) - 1)
+        cur_y = -total_bh / 2.0
+        for ln, ch_val, bh in zip(all_lines, line_caps, b_heights):
+            ln._banner_rect = QRectF(-ln.w / 2.0 - px, cur_y, ln.w + 2 * px, bh)
+            ln.x = -ln.w / 2.0
+            baseline_y = cur_y + py + ch_val
+            ln.y = baseline_y - ln.fm.ascent()
+            cur_y += bh + ls
 
-        if cfg.get("bg_shadow"):
-            sc = QColor(cfg.get("bg_shadow_color", "#000000"))
-            _draw_blurred(p, lambda q: q.fillPath(card_path, sc), card_path.boundingRect(),
-                          cfg.get("bg_shadow_blur", 16), cfg.get("bg_shadow_x", 0), cfg.get("bg_shadow_y", 8),
-                          float(cfg.get("bg_shadow_alpha", 30)) / 100.0)
-
-        c1 = _alpha_color(cfg.get("bg_color", "#000000"), cfg.get("bg_alpha", 170))
-        c2 = _alpha_color(cfg.get("split_color2", "#FFFFFF"), cfg.get("split_alpha2", 255))
-        if shape == "outline":
-            pass
-        elif shape == "gradient":
-            g = QLinearGradient(QPointF(0, card.bottom()), QPointF(0, card.top()))
-            g.setColorAt(0.0, c1)
-            g.setColorAt(1.0, _alpha_color(cfg.get("bg_color", "#000000"), 0))
-            p.fillPath(card_path, QBrush(g))
-        else:
-            p.save()
-            p.setClipPath(card_path)
-            if len(sections) == 2 and split in ("vertical", "horizontal"):
-                for k, s in enumerate(sections):
-                    p.fillRect(s["rect"].adjusted(-1, -1, 1, 1), c1 if k == 0 else c2)
-            else:
-                p.fillPath(card_path, c1)
-            bw = float(cfg.get("bg_bottom_w", 0))
-            if bw > 0:
-                br = card_path.boundingRect()
-                p.fillRect(QRectF(br.left(), br.bottom() - bw, br.width(), bw), QColor(cfg.get("bg_bottom_color", "#D90429")))
-            p.restore()
-        bdw = float(cfg.get("bg_border_w", 0))
-        if bdw > 0:
-            p.strokePath(card_path, QPen(QColor(cfg.get("bg_border_color", "#FFFFFF")), bdw,
-                                         Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-
-    # ── 2) 文字路径（按颜色分组） ──
+    # ── 预先构建文字路径（按颜色分组 & 逐行路径） ──
     color_paths = {}
     full_main = QPainterPath()
     full_sub = QPainterPath()
     rtl = bool(cfg.get("rtl"))
     for ln in all_lines:
         baseline = ln.y + ln.fm.ascent()
+        ln_path = QPainterPath()
         runs = []
         i = 0
         while i < len(ln.text):
@@ -763,6 +1126,7 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
                 cur -= rw
             path = QPainterPath()
             path.addText(QPointF(cur, baseline), ln.font, s)
+            ln_path.addPath(path)
             key = ln.hl_color if is_hl else ln.color
             color_paths.setdefault(key, QPainterPath()).addPath(path)
             if ln.kind == "sub_line":
@@ -771,6 +1135,144 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
                 full_main.addPath(path)
             if not rtl:
                 cur += rw
+        ln._glyph_path = ln_path
+
+    # ── 1) 背景 ──
+    if use_bg:
+        radius = float(cfg.get("bg_radius", 18))
+        c1 = _alpha_color(cfg.get("bg_color", "#000000"), cfg.get("bg_alpha", 170))
+        c2 = _alpha_color(cfg.get("split_color2", "#FFFFFF"), cfg.get("split_alpha2", 255))
+        bg_tex1 = cfg.get("bg_texture", "none") or "none"
+        bg_tex2 = (cfg.get("sub_bg_texture", "none") or "none") if (sub_enabled or split == "vertical") else bg_tex1
+
+        fit = bool(cfg.get("bg_fit", True)) and not lead_lines and not sub_lines \
+            and icon == "none" and shape in ("rounded", "rect", "pill", "torn", "notch", "ribbon", "bow", "wave")
+
+        if is_brush_shape or (fit and split == "vertical" and len(all_lines) >= 1):
+            # 逐行独立底框（支持上下双色各自贴合行宽 + 笔刷/折纸/斑驳纹理）
+            line_items = []
+            full_bg_path = QPainterPath()
+            for idx, ln in enumerate(all_lines):
+                is_sec = (split == "vertical" and getattr(ln, "_sec_idx", 0) >= 1) or ln.kind == "sub_line"
+                lr = getattr(ln, "_banner_rect", None)
+                if lr is None:
+                    lr = QRectF(ln.x - px, ln.y - py, ln.w + 2 * px, ln.h + 2 * py)
+                l_tex = bg_tex2 if is_sec else bg_tex1
+                l_col = c2 if is_sec else c1
+                if l_tex == "crumpled":
+                    l_path = _shape_path("rect", lr, 0, seed=17 + idx * 31)
+                else:
+                    l_path = _shape_path(shape, lr, radius, seed=17 + idx * 31)
+                # 若字母上方有重音符号（如 Ñ 的波浪号）超出笔刷条顶边，自动融合一圈实心笔刷轮廓突起
+                if is_brush_shape and hasattr(ln, "_glyph_path") and not ln._glyph_path.isEmpty():
+                    gb = ln._glyph_path.boundingRect()
+                    if gb.top() < lr.top() + 3.0:
+                        top_clip = QPainterPath()
+                        top_clip.addRect(QRectF(lr.left(), gb.top() - 20.0, lr.width(), (lr.top() + 8.0) - (gb.top() - 20.0)))
+                        accent_part = ln._glyph_path.intersected(top_clip)
+                        if not accent_part.isEmpty():
+                            ab = accent_part.boundingRect().adjusted(-9.0, -6.0, 9.0, 8.0)
+                            bump = QPainterPath()
+                            bump.addRoundedRect(ab, 8.0, 8.0)
+                            l_path = l_path.united(bump)
+                line_items.append((lr, l_path, l_col, l_tex, 17 + idx * 31))
+                full_bg_path.addPath(l_path)
+
+            if cfg.get("bg_shadow") and not full_bg_path.isEmpty():
+                sc = QColor(cfg.get("bg_shadow_color", "#000000"))
+                _draw_blurred(p, lambda q: q.fillPath(full_bg_path, sc), full_bg_path.boundingRect(),
+                              cfg.get("bg_shadow_blur", 16), cfg.get("bg_shadow_x", 0), cfg.get("bg_shadow_y", 8),
+                              float(cfg.get("bg_shadow_alpha", 30)) / 100.0)
+
+            # 若次行是折纸条且首行是深色笔刷条，先画次行再画首行（让首行笔刷压在次行上方更自然）
+            draw_order = list(reversed(line_items)) if (len(line_items) > 1 and line_items[-1][3] == "crumpled") else line_items
+            for lr, l_path, l_col, l_tex, l_seed in draw_order:
+                if l_tex == "crumpled":
+                    g_base = QLinearGradient(QPointF(lr.left(), 0), QPointF(lr.right(), 0))
+                    c_zero = QColor(l_col.red(), l_col.green(), l_col.blue(), 0)
+                    c_edge = QColor(int(l_col.red() * 0.35), int(l_col.green() * 0.35), int(l_col.blue() * 0.35), int(l_col.alpha() * 0.7))
+                    g_base.setColorAt(0.0, c_zero)
+                    g_base.setColorAt(0.05, c_edge)
+                    g_base.setColorAt(0.14, l_col)
+                    g_base.setColorAt(0.86, l_col)
+                    g_base.setColorAt(0.95, c_edge)
+                    g_base.setColorAt(1.0, c_zero)
+                    p.fillPath(l_path, QBrush(g_base))
+                else:
+                    p.fillPath(l_path, l_col)
+                _draw_bg_texture(p, lr, l_path, l_tex, l_col, seed=l_seed)
+                bdw = float(cfg.get("bg_border_w", 0))
+                if bdw > 0:
+                    p.strokePath(l_path, QPen(QColor(cfg.get("bg_border_color", "#FFFFFF")), bdw,
+                                              Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        else:
+            if shape == "hug":
+                card_path = QPainterPath()
+                for i, ln in enumerate(all_lines):
+                    y1 = ln.y
+                    y2 = ln.y + ln.h
+                    if i > 0:
+                        y1 = min(y1, all_lines[i-1].y + all_lines[i-1].h)
+                    if i < len(all_lines) - 1:
+                        y2 = max(y2, all_lines[i+1].y)
+                    card_path.addRect(QRectF(ln.x, y1, ln.w, y2 - y1))
+                
+                card_path = card_path.simplified()
+                if not card_path.isEmpty():
+                    stroker = QPainterPathStroker()
+                    # The radius of the stroke determines the padding
+                    stroker.setWidth(max(px, py) * 2 if max(px, py) > 0 else 20)
+                    stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                    stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+                    outline = stroker.createStroke(card_path)
+                    card_path = card_path.united(outline)
+                    card_path = card_path.simplified()
+            elif fit:
+                card_path = QPainterPath()
+                for ln in all_lines:
+                    lr = QRectF(ln.x - px, ln.y - py, ln.w + 2 * px, ln.h + 2 * py)
+                    card_path.addPath(_shape_path(shape, lr, radius))
+                card_path = card_path.simplified()
+            else:
+                card_path = _shape_path(shape, card, radius)
+
+            if cfg.get("bg_shadow"):
+                sc = QColor(cfg.get("bg_shadow_color", "#000000"))
+                _draw_blurred(p, lambda q: q.fillPath(card_path, sc), card_path.boundingRect(),
+                              cfg.get("bg_shadow_blur", 16), cfg.get("bg_shadow_x", 0), cfg.get("bg_shadow_y", 8),
+                              float(cfg.get("bg_shadow_alpha", 30)) / 100.0)
+
+            if shape == "outline":
+                pass
+            elif shape == "gradient":
+                g = QLinearGradient(QPointF(0, card.bottom()), QPointF(0, card.top()))
+                g.setColorAt(0.0, c1)
+                g.setColorAt(1.0, _alpha_color(cfg.get("bg_color", "#000000"), 0))
+                p.fillPath(card_path, QBrush(g))
+            else:
+                p.save()
+                p.setClipPath(card_path)
+                if len(sections) == 2 and split in ("vertical", "horizontal"):
+                    for k, s in enumerate(sections):
+                        sr = s["rect"].adjusted(-1, -1, 1, 1)
+                        scol = c1 if k == 0 else c2
+                        stex = bg_tex1 if k == 0 else bg_tex2
+                        p.fillRect(sr, scol)
+                        sp = QPainterPath()
+                        sp.addRect(sr)
+                        _draw_bg_texture(p, sr, sp.intersected(card_path), stex, scol, seed=19 + k * 29)
+                else:
+                    p.fillPath(card_path, c1)
+                    _draw_bg_texture(p, card_path.boundingRect(), card_path, bg_tex1, c1, seed=19)
+                bw = float(cfg.get("bg_bottom_w", 0))
+                if bw > 0:
+                    br = card_path.boundingRect()
+                    p.fillRect(QRectF(br.left(), br.bottom() - bw, br.width(), bw), QColor(cfg.get("bg_bottom_color", "#D90429")))
+                p.restore()
+            bdw = float(cfg.get("bg_border_w", 0))
+            if bdw > 0:
+                p.strokePath(card_path, QPen(QColor(cfg.get("bg_border_color", "#FFFFFF")), bdw,
+                                             Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
 
     base_sw = float(cfg.get("stroke_width", 6)) if cfg.get("stroke") else 0.0
     ms_extra = float(cfg.get("ms_step", 6)) * int(cfg.get("ms_layers", 2)) if cfg.get("multi_stroke") else 0.0
@@ -825,6 +1327,14 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
     for key, path in color_paths.items():
         p.fillPath(path, QBrush(QColor(key)))
 
+    # ── 6.5) 文字做旧纹理（斜向裂纹 / 横向干笔刷斑驳 / 复古颗粒） ──
+    tex_main = cfg.get("text_texture", "none") or "none"
+    tex_sub = (cfg.get("sub_text_texture", "none") or "none") if sub_enabled else tex_main
+    if tex_main != "none" and not full_main.isEmpty():
+        _draw_text_texture(p, full_main, tex_main, col, seed=31)
+    if tex_sub != "none" and not full_sub.isEmpty():
+        _draw_text_texture(p, full_sub, tex_sub, sub_color_val, seed=67)
+
     # ── 7) 下划线 ──
     if cfg.get("underline"):
         uw = float(cfg.get("underline_w", 4))
@@ -848,8 +1358,9 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float):
 WM_MARGIN = 30
 
 
-def render_watermark_layer(items: list) -> QImage:
-    img = QImage(CANVAS_W, CANVAS_H, QImage.Format.Format_ARGB32_Premultiplied)
+def render_watermark_layer(items: list, canvas_wh: tuple = None) -> QImage:
+    cw, ch = canvas_wh if (canvas_wh and len(canvas_wh) == 2) else get_canvas_size()
+    img = QImage(cw, ch, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -860,29 +1371,33 @@ def render_watermark_layer(items: list) -> QImage:
         base.update(wm or {})
         if base.get("enabled"):
             try:
-                _draw_watermark(p, base)
+                _draw_watermark(p, base, cw, ch)
             except Exception as e:
                 print("watermark draw failed:", e)
     p.end()
     return img
 
 
-def _wm_pos(pos: str, w: float, h: float, ox: float, oy: float) -> tuple:
+def _wm_pos(pos: str, w: float, h: float, ox: float, oy: float, cw: int = None, ch: int = None) -> tuple:
+    if cw is None or ch is None:
+        cw, ch = get_canvas_size()
     m = WM_MARGIN
     if pos == "tl":
         x, y = m, m
     elif pos == "tr":
-        x, y = CANVAS_W - m - w, m
+        x, y = cw - m - w, m
     elif pos == "bl":
-        x, y = m, CANVAS_H - m - h
+        x, y = m, ch - m - h
     elif pos == "bc":
-        x, y = (CANVAS_W - w) / 2, CANVAS_H - m - h
+        x, y = (cw - w) / 2, ch - m - h
     else:  # br
-        x, y = CANVAS_W - m - w, CANVAS_H - m - h
+        x, y = cw - m - w, ch - m - h
     return x + ox, y + oy
 
 
-def _draw_watermark(p: QPainter, wm: dict):
+def _draw_watermark(p: QPainter, wm: dict, cw: int = None, ch: int = None):
+    if cw is None or ch is None:
+        cw, ch = get_canvas_size()
     if wm["type"] == "image":
         path = wm.get("image_path", "")
         if not path or not os.path.isfile(path):
@@ -894,7 +1409,7 @@ def _draw_watermark(p: QPainter, wm: dict):
             im = im.mirrored(bool(wm.get("flip_h")), bool(wm.get("flip_v")))
         s = float(wm.get("scale", 30)) / 100.0
         w, h = im.width() * s, im.height() * s
-        x, y = _wm_pos(wm.get("position", "br"), w, h, float(wm.get("ox", 0)), float(wm.get("oy", 0)))
+        x, y = _wm_pos(wm.get("position", "br"), w, h, float(wm.get("ox", 0)), float(wm.get("oy", 0)), cw, ch)
         p.save()
         p.setOpacity(float(wm.get("opacity", 100)) / 100.0)
         p.drawImage(QRectF(x, y, w, h), im)
@@ -912,7 +1427,7 @@ def _draw_watermark(p: QPainter, wm: dict):
         th = fm.height() * len(lines)
         padx, pady = fm.height() * 0.4, fm.height() * 0.2
         w, h = tw + 2 * padx, th + 2 * pady
-        x, y = _wm_pos(wm.get("position", "br"), w, h, float(wm.get("ox", 0)), float(wm.get("oy", 0)))
+        x, y = _wm_pos(wm.get("position", "br"), w, h, float(wm.get("ox", 0)), float(wm.get("oy", 0)), cw, ch)
         bga = float(wm.get("bg_opacity", 50))
         if bga > 0:
             p.setPen(Qt.PenStyle.NoPen)

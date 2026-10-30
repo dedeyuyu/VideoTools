@@ -29,8 +29,11 @@ from image_worker.duet_worker import (
     get_data_dir, get_cache_dir, probe_info, align_person_video, extract_frame_png,
     set_cache_root, new_task_cache_dir, list_task_cache_dirs, get_card_lib_dir,
     default_template, box_layout, build_render_cmd, run_cmd, CANVAS_W, CANVAS_H,
+    REF_W, REF_H, ASPECT_RATIOS, ASPECT_RESOLUTIONS,
+    set_canvas_aspect, get_canvas_aspect, get_canvas_size,
     SOURCES, SRC_LABELS, FILL_MODES, LAYOUT_PRESETS, template_from_cells, tpl_cells,
-    sources_used, cell_rect_px, task_source, task_source_meta,
+    sources_used, cell_rect_px, task_source, task_source_meta, tpl_bg_color, tpl_divider,
+    tpl_diag_ys, set_tpl_diag_ys,
 )
 from image_worker.duet_render import (
  render_watermark_layer,    default_card, template_icon, compose_preview, render_card_layer, load_font_file,
@@ -70,7 +73,14 @@ def _get_all_presets():
 PRESET_ORDER_FILE = "card_preset_order.json"      # {"title": [名称...], "phone": [名称...]}
 PRESET_HIDDEN_FILE = "card_presets_hidden.json"   # 被用户删除的内置预设名称
 
+_FEATURED_BRUSH_PRESETS = (
+    '笔刷裂纹-深蓝宝蓝双色',
+    '笔刷折纸-黑底冰蓝双色',
+    '笔刷斑驳-白底宝蓝双色',
+)
+
 _BUILTIN_PRESET_NAMES = {
+    *_FEATURED_BRUSH_PRESETS,
     '黄金强光贴纸 (El Resplandor Dorado)', '霓虹青空发光体 (Cielo Neón)', '街头冲击 (Impacto Urbano)',
     '纯净极简 (Minimalismo Puro)', '复古报纸 (Titular de Prensa)', '警戒红幕 (Alerta Roja)',
     '深海权威 (Autoridad Profunda)', '复古羊皮纸 (Pergamino Clásico)', '活力柑橘 (Cítrico Vibrante)',
@@ -111,10 +121,12 @@ def ordered_preset_names(kind):
     nameset = set(names)
     saved = [n for n in order if n in nameset]
     seen = set(saved)
+    featured = [n for n in _FEATURED_BRUSH_PRESETS if kind == "title" and n in nameset and n not in seen]
+    seen.update(featured)
     new_user = [n for n in names if n not in seen and _preset_is_user(n, presets[n])]
     new_user.reverse()
     new_def = [n for n in names if n not in seen and not _preset_is_user(n, presets[n])]
-    return new_user + saved + new_def
+    return featured + new_user + saved + new_def
 
 
 def save_preset_order(kind, names):
@@ -378,7 +390,7 @@ class VideoListWidget(QListWidget):
 
 
 class CanvasView(QWidget):
-    """按 9:16 比例显示合成画面；可编辑模式下：拖动格子分界线、拖动/缩放画中画小窗、点击选中格子。"""
+    """按当前画布比例（9:16 / 3:4 / 1:1 / 4:3 / 16:9）显示合成画面；可编辑模式下：拖动格子分界线、拖动/缩放画中画小窗、点击选中格子。"""
     splitDragged = pyqtSignal(float)
     cellsChanged = pyqtSignal(list)
     cellSelected = pyqtSignal(int)
@@ -392,7 +404,7 @@ class CanvasView(QWidget):
         self._draggable = draggable
         self._cells = None
         self._drag = None
-        self.setMinimumSize(240, 427)
+        self.setMinimumSize(240, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
 
@@ -409,8 +421,9 @@ class CanvasView(QWidget):
 
     def _rect(self):
         w, h = self.width(), self.height()
-        s = min(w / CANVAS_W, h / CANVAS_H)
-        tw, th = CANVAS_W * s, CANVAS_H * s
+        cw, ch = get_canvas_size()
+        s = min(w / cw, h / ch)
+        tw, th = cw * s, ch * s
         return QRectF((w - tw) / 2, (h - th) / 2, tw, th)
 
     def _to_frac(self, pos):
@@ -428,9 +441,23 @@ class CanvasView(QWidget):
         p.setPen(QPen(QColor("#718096"), 1))
         p.drawRect(r)
         if self._draggable and self._cells:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
             pen = QPen(QColor("#F6E05E"), 2)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
+            diag = tpl_diag_ys(self._cells)
+            if diag is not None:
+                yl, yr = diag
+                p1 = QPointF(r.left(), r.top() + yl * r.height())
+                p2 = QPointF(r.right(), r.top() + yr * r.height())
+                p.setPen(QPen(QColor("#F6E05E"), 2.5, Qt.PenStyle.DashLine))
+                p.drawLine(p1, p2)
+                p.setPen(QPen(QColor("#1A202C"), 1.5))
+                p.setBrush(QColor("#F6E05E"))
+                for pt in (p1, p2):
+                    p.drawEllipse(pt, 6, 6)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(pen)
             for cl in self._cells:
                 x = r.left() + cl["x"] * r.width()
                 y = r.top() + cl["y"] * r.height()
@@ -442,11 +469,15 @@ class CanvasView(QWidget):
                     p.drawRect(QRectF(x + w - 8, y + h - 8, 8, 8))
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.setPen(pen)
-                else:
+                elif not cl.get("poly"):
                     if cl["x"] + cl["w"] < 0.999:
                         p.drawLine(QPointF(x + w, y), QPointF(x + w, y + h))
                     if cl["y"] + cl["h"] < 0.999:
                         p.drawLine(QPointF(x, y + h), QPointF(x + w, y + h))
+                    if cl["x"] > 0.001:
+                        p.drawLine(QPointF(x, y), QPointF(x, y + h))
+                    if cl["y"] > 0.001:
+                        p.drawLine(QPointF(x, y), QPointF(x + w, y))
         elif self._draggable:
             y = r.top() + r.height() * self._split
             p.setPen(QPen(QColor("#F6E05E"), 2))
@@ -470,18 +501,31 @@ class CanvasView(QWidget):
                 return ("resize", i)
             if cl["x"] <= fx <= x2 and cl["y"] <= fy <= y2:
                 return ("move", i)
+        # 1.5) 斜线分割线及左右端点手柄
+        diag = tpl_diag_ys(self._cells)
+        if diag is not None:
+            yl, yr = diag
+            if abs(fx - 0.0) < tolx * 2.5 and abs(fy - yl) < toly * 2.5:
+                return ("diag_left", yl, yr)
+            if abs(fx - 1.0) < tolx * 2.5 and abs(fy - yr) < toly * 2.5:
+                return ("diag_right", yl, yr)
+            if 0.0 <= fx <= 1.0:
+                y_line = yl + (yr - yl) * fx
+                if abs(fy - y_line) < toly * 1.8:
+                    return ("diag_mid", yl, yr, fy)
+                if 0.0 <= fy <= 1.0:
+                    return ("select", 0 if fy <= y_line else 1)
         # 2) 普通格子的内部分界线
         best = None
         for cl in self._cells:
-            if cl.get("pip"):
+            if cl.get("pip") or cl.get("poly"):
                 continue
             for axis, v, lo, hi, d in (
                     ("x", cl["x"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"])),
                     ("x", cl["x"] + cl["w"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"] - cl["w"])),
                     ("y", cl["y"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"])),
                     ("y", cl["y"] + cl["h"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"] - cl["h"]))):
-                if v <= 0.001 or v >= 0.999:
-                    continue
+                # 画布四周的外边也可以拖动（把格子往里收，留出背景区域）
                 along = fy if axis == "x" else fx
                 tol = tolx if axis == "x" else toly
                 if d < tol and lo <= along <= hi and (best is None or d < best[3]):
@@ -508,6 +552,9 @@ class CanvasView(QWidget):
         fx, fy = self._to_frac(e.position())
         if hit[0] in ("move", "resize", "select"):
             self.cellSelected.emit(hit[1])
+        if hit[0] in ("diag_left", "diag_right", "diag_mid"):
+            self._drag = hit
+            return
         if hit[0] == "move":
             cl = self._cells[hit[1]]
             self._drag = ("move", hit[1], fx - cl["x"], fy - cl["y"])
@@ -555,6 +602,8 @@ class CanvasView(QWidget):
                     r = self._rect()
                     if abs(e.position().y() - (r.top() + r.height() * self._split)) < 10:
                         cur = Qt.CursorShape.SizeVerCursor
+                elif hit and hit[0] in ("diag_left", "diag_right", "diag_mid"):
+                    cur = Qt.CursorShape.SizeVerCursor
                 elif hit and hit[0] == "edge":
                     cur = Qt.CursorShape.SizeHorCursor if hit[1] == "x" else Qt.CursorShape.SizeVerCursor
                 elif hit and hit[0] == "move":
@@ -570,7 +619,18 @@ class CanvasView(QWidget):
             self.update()
             return
         m = self.MIN_FRAC
-        if d[0] == "move":
+        if d[0] == "diag_left":
+            _, yl0, yr0 = d
+            set_tpl_diag_ys(self._cells, max(0.05, min(0.95, fy)), yr0)
+        elif d[0] == "diag_right":
+            _, yl0, yr0 = d
+            set_tpl_diag_ys(self._cells, yl0, max(0.05, min(0.95, fy)))
+        elif d[0] == "diag_mid":
+            _, yl0, yr0, fy0 = d
+            dy = fy - fy0
+            dy = max(0.05 - min(yl0, yr0), min(0.95 - max(yl0, yr0), dy))
+            set_tpl_diag_ys(self._cells, yl0 + dy, yr0 + dy)
+        elif d[0] == "move":
             cl = self._cells[d[1]]
             cl["x"] = max(0.0, min(1 - cl["w"], fx - d[2]))
             cl["y"] = max(0.0, min(1 - cl["h"], fy - d[3]))
@@ -588,9 +648,13 @@ class CanvasView(QWidget):
             v = fx if axis == "x" else fy
             before = [self._cells[i] for i in before_idxs]
             after = [self._cells[i] for i in after_idxs]
-            lo = max([cl[pos] + m for cl in before] + [m])
-            hi = min([cl[pos] + cl[size] - m for cl in after] + [1 - m])
+            lo = max([cl[pos] + m for cl in before] + [0.0])
+            hi = min([cl[pos] + cl[size] - m for cl in after] + [1.0])
             v = max(lo, min(hi, v))
+            if v < 0.012 and lo <= 0.0:         # 拖回画布边缘时自动吸附
+                v = 0.0
+            elif v > 0.988 and hi >= 1.0:
+                v = 1.0
             for cl in before:
                 cl[size] = v - cl[pos]
             for cl in after:
@@ -760,21 +824,47 @@ class PasteDialog(QDialog):
 
 
 class PresetManagerDialog(QDialog):
-    """卡片预设管理面板：搜索、多选批量删除、置顶/上移/下移/置底、拖拽排序、重命名、应用。"""
+    """卡片预设管理面板：搜索、多选批量删除、置顶/上移/下移/置底、拖拽排序、重命名、导出预设名、跨任务连续应用。"""
     applyRequested = pyqtSignal(str)
     presetsChanged = pyqtSignal()
 
-    def __init__(self, kind, current="", parent=None):
+    def __init__(self, kind, current="", parent=None, duet_ui=None):
         super().__init__(parent)
         self.kind = kind
-        self.setWindowTitle(f"管理{'标题' if kind == 'title' else '电话'}卡片预设")
-        self.resize(560, 640)
+        self.duet_ui = duet_ui
+        self.setWindowTitle(f"管理{'标题' if kind == 'title' else '电话'}卡片预设（可不关闭窗口直接切换任务套用）")
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.resize(640, 700)
         self.order = ordered_preset_names(kind)
         self._syncing = False
 
         v = QVBoxLayout(self)
+
+        # ── 顶部：任务快速切换栏（无需关闭管理窗口即可切换任务并连续套用预设） ──
+        task_box = QGroupBox("🎯 当前操作任务（也可直接点击主界面左侧「任务列表」切换）")
+        tv = QVBoxLayout(task_box)
+        tv.setContentsMargins(8, 6, 8, 6)
+        tv.setSpacing(4)
+        tr = QHBoxLayout()
+        self.btn_prev_task = QPushButton("⬅ 上一任务")
+        self.btn_prev_task.setToolTip("切换到上一个任务")
+        self.btn_prev_task.clicked.connect(lambda: self._step_task(-1))
+        self.cmb_task = QComboBox()
+        self.cmb_task.currentIndexChanged.connect(self._on_task_combo_changed)
+        self.btn_next_task = QPushButton("下一任务 ➡")
+        self.btn_next_task.setToolTip("切换到下一个任务")
+        self.btn_next_task.clicked.connect(lambda: self._step_task(1))
+        tr.addWidget(self.btn_prev_task)
+        tr.addWidget(self.cmb_task, 1)
+        tr.addWidget(self.btn_next_task)
+        tv.addLayout(tr)
+        self.lbl_task_preset = QLabel("")
+        self.lbl_task_preset.setStyleSheet("color:#3182CE; font-weight:bold;")
+        tv.addWidget(self.lbl_task_preset)
+        v.addWidget(task_box)
+
         self.txt_search = QLineEdit()
-        self.txt_search.setPlaceholderText("🔍 搜索预设名称（支持部分匹配）…")
+        self.txt_search.setPlaceholderText("🔍 搜索预设名称（支持部分匹配，搜索后可直接点右侧「应用到当前任务」）…")
         self.txt_search.setClearButtonEnabled(True)
         self.txt_search.textChanged.connect(self._rebuild)
         v.addWidget(self.txt_search)
@@ -800,39 +890,97 @@ class PresetManagerDialog(QDialog):
         _b("⬆ 上移", "把选中的预设上移一位", lambda: self._move("up"))
         _b("⬇ 下移", "把选中的预设下移一位", lambda: self._move("down"))
         _b("⏬ 置底", "把选中的预设移到最后面", lambda: self._move("bottom"))
-        side.addSpacing(10)
+        side.addSpacing(6)
         _b("✏️ 重命名", "重命名当前选中的预设", self._rename)
         b_del = _b("🗑 删除所选", "批量删除所有选中的预设（可多选：Ctrl / Shift）", self._delete)
         b_del.setStyleSheet("color:#E53E3E;")
-        side.addSpacing(10)
+        side.addSpacing(6)
         _b("☑ 全选", "选中当前列表（搜索结果）里的全部预设", self.lst.selectAll)
         _b("☐ 取消选择", "取消所有选择", self.lst.clearSelection)
-        side.addSpacing(10)
+        side.addSpacing(6)
+        _b("📋 复制全部名称(表格)", "一键复制当前列表全部预设名称（每行一个），可直接 Ctrl+V 粘贴到 Excel 表格列", self._copy_all_names)
+        _b("📋 复制所选名称", "复制当前选中的预设名称（每行一个），可直接粘贴到 Excel 表格列", self._copy_selected_names)
+        _b("📄 导出名称表格(.csv)", "把所有预设名称导出为 Excel 可直接打开的 .csv 或 .txt 文件", self._export_names_file)
+        side.addSpacing(6)
         _b("↺ 恢复内置预设", "把之前删除的内置预设全部恢复", self._restore_builtin)
         side.addStretch()
-        b_apply = _b("✅ 应用到卡片", "把选中的预设应用到当前卡片（也可直接双击预设）", self._apply)
+        b_apply = _b("✅ 应用到当前任务", "把选中的预设立即应用到当前任务的卡片（也可直接双击预设）", self._apply)
         b_apply.setProperty("class", "ActionBtn")
+        b_apply_next = _b("⏭ 应用并切下一任务", "把选中的预设应用到当前任务，并自动切换到下一个任务", self._apply_and_next)
+        b_apply_next.setStyleSheet("font-weight:bold;")
         body.addLayout(side)
         v.addLayout(body, 1)
 
         self.lbl_count = QLabel("")
         self.lbl_count.setStyleSheet("color:#718096;")
         v.addWidget(self.lbl_count)
-        tip = QLabel("提示：可直接用鼠标拖动预设调整顺序；搜索状态下也可以上移/下移。排序会同步到「预设」下拉框。")
+        tip = QLabel("提示：本窗口打开时无需关闭，可直接点击上方「上一任务/下一任务」或左侧「任务列表」切换任务，搜索预设后点「✅ 应用到当前任务」立即在当前任务生效。")
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#718096;")
         v.addWidget(tip)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        bb.rejected.connect(self.reject)
-        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.close)
+        bb.accepted.connect(self.close)
         v.addWidget(bb)
 
         self._rebuild()
-        if current:
+        self.sync_from_duet_ui(select_preset=current)
+
+    # —— 任务同步与切换 ——
+    def sync_from_duet_ui(self, select_preset=None):
+        """从主界面同步任务列表、当前任务序号及当前任务的预设名称。"""
+        u = self.duet_ui
+        self.cmb_task.blockSignals(True)
+        self.cmb_task.clear()
+        tasks = getattr(u, "tasks", None) if u else None
+        if tasks:
+            cur = max(0, min(getattr(u, "cur_task", 0), len(tasks) - 1))
+            for i, t in enumerate(tasks):
+                p_name = t.get(f"{self.kind}_preset", "")
+                suffix = f"  〔{p_name}〕" if p_name else ""
+                self.cmb_task.addItem(f"{i + 1:02d}. {os.path.basename(t.get('viral', ''))}{suffix}", i)
+            self.cmb_task.setCurrentIndex(cur)
+            self.cmb_task.setEnabled(True)
+            self.btn_prev_task.setEnabled(cur > 0)
+            self.btn_next_task.setEnabled(cur < len(tasks) - 1)
+            cur_preset = tasks[cur].get(f"{self.kind}_preset", "")
+            self.lbl_task_preset.setText(
+                f"当前第 {cur + 1}/{len(tasks)} 个任务 · 已绑预设：{cur_preset or '（未指定独立预设）'}"
+            )
+            if select_preset is None and cur_preset:
+                select_preset = cur_preset
+        else:
+            self.cmb_task.addItem("（尚未对齐时间线，将应用到全局默认卡片）", -1)
+            self.cmb_task.setEnabled(False)
+            self.btn_prev_task.setEnabled(False)
+            self.btn_next_task.setEnabled(False)
+            self.lbl_task_preset.setText("当前未对齐任务：点击「应用」将修改全局默认卡片样式")
+        self.cmb_task.blockSignals(False)
+
+        if select_preset:
+            self.lst.clearSelection()
             for i in range(self.lst.count()):
-                if self.lst.item(i).data(Qt.ItemDataRole.UserRole) == current:
+                if self.lst.item(i).data(Qt.ItemDataRole.UserRole) == select_preset:
                     self.lst.setCurrentRow(i)
+                    self.lst.item(i).setSelected(True)
+                    self.lst.scrollToItem(self.lst.item(i))
                     break
+
+    def _on_task_combo_changed(self, idx):
+        u = self.duet_ui
+        if not u or not getattr(u, "tasks", None):
+            return
+        row = self.cmb_task.itemData(idx)
+        if row is not None and 0 <= row < len(u.tasks) and row != u.cur_task:
+            u.task_list.setCurrentRow(row)
+
+    def _step_task(self, delta):
+        u = self.duet_ui
+        if not u or not getattr(u, "tasks", None):
+            return
+        new_row = max(0, min(len(u.tasks) - 1, u.cur_task + delta))
+        if new_row != u.cur_task:
+            u.task_list.setCurrentRow(new_row)
 
     # —— 数据 ——
     def _visible_names(self):
@@ -877,6 +1025,53 @@ class PresetManagerDialog(QDialog):
     def _commit(self):
         save_preset_order(self.kind, self.order)
         self.presetsChanged.emit()
+
+    # —— 复制 / 导出预设名称（供表格粘贴选择预设使用） ——
+    def _copy_all_names(self):
+        names = self._visible_names()
+        if not names:
+            QMessageBox.information(self, "提示", "当前列表中没有可复制的预设名称。")
+            return
+        QApplication.clipboard().setText("\n".join(names))
+        self.lbl_count.setText(f"✅ 已复制 {len(names)} 个预设名称到剪贴板！可直接到 Excel 表格中按 Ctrl+V 粘贴。")
+        QMessageBox.information(self, "复制成功",
+                                f"已复制 {len(names)} 个预设名称到剪贴板（每行一个）！\n\n"
+                                f"现在可以直接在 Excel / WPS 表格或「批量编辑文案与预设」表格中按 Ctrl+V 粘贴。")
+
+    def _copy_selected_names(self):
+        names = self._selected()
+        if not names:
+            QMessageBox.information(self, "提示", "请先在列表中选中要复制名称的预设（可按 Ctrl / Shift 多选）。")
+            return
+        QApplication.clipboard().setText("\n".join(names))
+        self.lbl_count.setText(f"✅ 已复制所选的 {len(names)} 个预设名称到剪贴板！可直接到表格中按 Ctrl+V 粘贴。")
+
+    def _export_names_file(self):
+        names = self._visible_names()
+        if not names:
+            QMessageBox.information(self, "提示", "当前没有可导出的预设名称。")
+            return
+        default_fn = f"{'标题' if self.kind == 'title' else '电话'}卡片预设名称列表.csv"
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "导出预设名称列表", default_fn,
+            "CSV 表格文件 (*.csv);;纯文本文件 (*.txt)"
+        )
+        if not save_path:
+            return
+        try:
+            with open(save_path, "w", encoding="utf-8-sig", newline="") as f:
+                if save_path.lower().endswith(".csv"):
+                    w = csv.writer(f)
+                    w.writerow(["序号", "预设名称", "类型"])
+                    presets = _visible_presets()
+                    for idx, n in enumerate(names, 1):
+                        builtin = not _preset_is_user(n, presets.get(n))
+                        w.writerow([idx, n, "内置预设" if builtin else "自定义预设"])
+                else:
+                    f.write("\n".join(names))
+            QMessageBox.information(self, "导出成功", f"已成功导出 {len(names)} 个预设名称到：\n{save_path}\n\n可直接用 Excel 打开并复制名称列。")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", f"保存文件出错：{e}")
 
     # —— 操作 ——
     def _on_rows_moved(self, *a):
@@ -925,6 +1120,7 @@ class PresetManagerDialog(QDialog):
         self.order = [new if n == old else n for n in self.order]
         self._commit()
         self._rebuild(keep=[new])
+        self.sync_from_duet_ui(select_preset=new)
 
     def _delete(self):
         sel = self._selected()
@@ -956,8 +1152,33 @@ class PresetManagerDialog(QDialog):
     def _apply(self):
         sel = self._selected()
         if not sel:
+            QMessageBox.information(self, "提示", "请先在列表中选中一个预设。")
             return
-        self.applyRequested.emit(sel[0])
+        name = sel[0]
+        self.applyRequested.emit(name)
+        self.sync_from_duet_ui(select_preset=name)
+        u = self.duet_ui
+        if u and getattr(u, "tasks", None):
+            self.lbl_count.setText(f"✅ 已将「{name}」应用到第 {u.cur_task + 1:02d} 个任务！")
+        else:
+            self.lbl_count.setText(f"✅ 已将「{name}」应用到卡片！")
+
+    def _apply_and_next(self):
+        sel = self._selected()
+        if not sel:
+            QMessageBox.information(self, "提示", "请先在列表中选中一个预设。")
+            return
+        name = sel[0]
+        self.applyRequested.emit(name)
+        u = self.duet_ui
+        if u and getattr(u, "tasks", None) and u.cur_task + 1 < len(u.tasks):
+            done_idx = u.cur_task + 1
+            u.task_list.setCurrentRow(u.cur_task + 1)
+            self.sync_from_duet_ui()
+            self.lbl_count.setText(f"✅ 第 {done_idx:02d} 个任务已套用「{name}」，已自动切到第 {u.cur_task + 1:02d} 个任务！")
+        else:
+            self.sync_from_duet_ui(select_preset=name)
+            self.lbl_count.setText(f"✅ 已将「{name}」应用到最后一个任务！")
 
 
 class _PlainTextDelegate(QStyledItemDelegate):
@@ -1046,8 +1267,16 @@ class BatchCardTableDialog(QDialog):
         b_paste_all.clicked.connect(self._paste_at_current)
         b_clear_all = QPushButton("🧹 全部清空")
         b_clear_all.clicked.connect(lambda: [self._clear_col(c) for c in range(4)])
+        b_copy_tp = QPushButton("📤 复制全部标题预设名")
+        b_copy_tp.setToolTip("复制所有标题卡片预设名称（每行一个），可直接 Ctrl+V 粘贴到 Excel 表格供挑选")
+        b_copy_tp.clicked.connect(lambda: self._copy_preset_names(2, "标题卡片"))
+        b_copy_pp = QPushButton("📤 复制全部电话预设名")
+        b_copy_pp.setToolTip("复制所有电话卡片预设名称（每行一个），可直接 Ctrl+V 粘贴到 Excel 表格供挑选")
+        b_copy_pp.clicked.connect(lambda: self._copy_preset_names(3, "电话卡片"))
         top.addWidget(b_paste_all)
         top.addWidget(b_clear_all)
+        top.addWidget(b_copy_tp)
+        top.addWidget(b_copy_pp)
         top.addStretch()
         self.chk_force = QCheckBox("强制重新套用预设（覆盖已手动微调过的卡片样式）")
         self.chk_force.setToolTip("默认只有预设名称发生变化的任务才会重新套用预设；勾选后所有填写了预设的任务都会重新套用。")
@@ -1156,6 +1385,14 @@ class BatchCardTableDialog(QDialog):
         for it in self.tbl.selectedItems():
             it.setText("")
         self.tbl.resizeRowsToContents()
+
+    def _copy_preset_names(self, col_idx, label):
+        names = self.names.get(col_idx, [])
+        if not names:
+            QMessageBox.information(self, "提示", f"当前没有{label}预设名称。")
+            return
+        QApplication.clipboard().setText("\n".join(names))
+        self._flash(f"✅ 已复制 {len(names)} 个{label}预设名称到剪贴板，可直接到 Excel 按 Ctrl+V 粘贴。")
 
     def _clipboard_rows(self):
         rows = _parse_pasted_table(QApplication.clipboard().text())
@@ -1751,9 +1988,11 @@ class CardEditor(QWidget):
     changed = pyqtSignal()
     presetApplied = pyqtSignal(str)   # 用户从下拉框 / 管理面板套用了某个预设
 
-    def __init__(self, kind="title", parent=None):
+    def __init__(self, kind="title", parent=None, duet_ui=None):
         super().__init__(parent)
         self.kind = kind
+        self.duet_ui = duet_ui
+        self._preset_mgr_dlg = None
         self.w = {}
         self._font_file = ""
         self._loading = False
@@ -1820,7 +2059,7 @@ class CardEditor(QWidget):
         b_export.setIcon(QIcon(_theme_icon("export.svg")))
         b_export.setIconSize(QSize(18, 18))
         b_export.setFixedSize(32, 32)
-        b_export.setToolTip("导出当前选中的预设")
+        b_export.setToolTip("导出所有预设配置备份 (.json)")
         b_export.clicked.connect(self._export_preset)
         pr.addWidget(b_export)
 
@@ -1828,11 +2067,23 @@ class CardEditor(QWidget):
         b_manage.setIcon(QIcon(_theme_icon("settings.svg")))
         b_manage.setIconSize(QSize(18, 18))
         b_manage.setFixedSize(32, 32)
-        b_manage.setToolTip("打开预设管理面板：搜索、批量删除、排序、重命名")
+        b_manage.setToolTip("打开预设管理面板：搜索、跨任务连续套用、导出预设名称、排序、批量删除")
         b_manage.clicked.connect(self._open_preset_manager)
         pr.addWidget(b_manage)
         
         outer.addLayout(pr)
+
+        pr2 = QHBoxLayout()
+        pr2.setContentsMargins(0, 0, 0, 2)
+        b_copy_names = QPushButton("📋 复制全部预设名称（直接粘到表格）")
+        b_copy_names.setToolTip("一键复制所有预设名称到剪贴板（每行一个），可直接 Ctrl+V 粘贴到 Excel 表格中")
+        b_copy_names.clicked.connect(self._copy_all_preset_names)
+        b_mgr_quick = QPushButton("🗂 管理预设 / 边切任务边套用")
+        b_mgr_quick.setToolTip("打开非模态预设管理面板：支持搜索预设、不关窗口直接切换任务并一键套用")
+        b_mgr_quick.clicked.connect(self._open_preset_manager)
+        pr2.addWidget(b_copy_names)
+        pr2.addWidget(b_mgr_quick)
+        outer.addLayout(pr2)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1869,12 +2120,19 @@ class CardEditor(QWidget):
         self._add(g, "size", "spin", "字号", rng=(6, 400))
         self._add(g, "bold", "check", "加粗 (B)")
         self._add(g, "italic", "check", "斜体 (I)")
+        self._add(g, "uppercase", "check", "英文自动转大写 (A-Z)")
         self._add(g, "weight", "combo", "字重",
                   items=[(v, str(v)) for v in (100, 200, 300, 400, 500, 600, 700, 800, 900)])
         self._add(g, "letter_spacing", "dspin", "文字间距", rng=(-50, 200), step=1)
         self._add(g, "rtl", "combo", "文字方向", items=[(False, "自动 / 从左到右"), (True, "阿拉伯语 RTL")])
         self._add(g, "color", "color", "常规颜色")
         self._add(g, "hl_color", "color", "高亮颜色")
+        self._add(g, "text_texture", "combo", "文字做旧纹理", items=[
+            ("none", "无纹理 (纯色)"),
+            ("crackle", "斜向裂纹/抓痕 (图1/图3)"),
+            ("grunge_h", "横向干笔刷斑驳 (图2/图3)"),
+            ("grunge_dots", "颗粒噪点斑驳"),
+        ])
         self._add(g, "line_spacing", "dspin", "行间距", rng=(-100, 300), step=1)
 
         g = self._group("🎨 自动着色规则")
@@ -1888,9 +2146,23 @@ class CardEditor(QWidget):
         self._add(g, "split", "combo", "底框拆分模式", items=[("none", "单色连体"), ("vertical", "上下双色分离")])
         self._add(g, "split_color2", "color", "次行底框颜色")
         self._add(g, "split_alpha2", "spin", "次行底框透明度", rng=(0, 255))
+        self._add(g, "sub_bg_texture", "combo", "次行底框纹理", items=[
+            ("", "跟随首行底框纹理"),
+            ("none", "无纹理 (纯色)"),
+            ("speckles", "笔刷飞白噪点 (图1/图3)"),
+            ("grunge_brush", "干笔刷斑驳飞溅 (图2/图3)"),
+            ("crumpled", "折纸褶皱立体纹 (图2冰蓝)"),
+        ])
         self._add(g, "sub_size", "spin", "次行字号", rng=(6, 400))
         self._add(g, "sub_color", "color", "次行文本颜色")
         self._add(g, "sub_hl_color", "color", "次行高亮颜色")
+        self._add(g, "sub_text_texture", "combo", "次行文字纹理", items=[
+            ("", "跟随首行文字纹理"),
+            ("none", "无纹理 (纯色)"),
+            ("crackle", "斜向裂纹/抓痕 (图1/图3)"),
+            ("grunge_h", "横向干笔刷斑驳 (图2/图3)"),
+            ("grunge_dots", "颗粒噪点斑驳"),
+        ])
         self._add(g, "sub_stroke", "check", "次行启用描边")
         self._add(g, "sub_stroke_color", "color", "次行描边颜色")
         self._add(g, "sub_stroke_width", "spin", "次行描边宽度", rng=(0, 60))
@@ -1923,6 +2195,14 @@ class CardEditor(QWidget):
             ("bow", "向内凹多边形"),
             ("wave", "底部波浪"),
             ("torn", "撕裂边缘"),
+            ("brush", "笔刷涂抹条 (锯齿笔触)"),
+            ("brush_feather", "干笔刷/折纸条 (羽化笔触)"),
+        ])
+        self._add(g, "bg_texture", "combo", "底框表面纹理", items=[
+            ("none", "无纹理 (纯色)"),
+            ("speckles", "笔刷飞白噪点 (图1/图3)"),
+            ("grunge_brush", "干笔刷斑驳飞溅 (图2/图3)"),
+            ("crumpled", "折纸褶皱立体纹 (图2冰蓝)"),
         ])
         self._add(g, "bg_color", "color", "底框颜色")
         self._add(g, "bg_alpha", "spin", "透明度 (0-255)", rng=(0, 255))
@@ -2087,11 +2367,37 @@ class CardEditor(QWidget):
             elif t == "file":
                 cfg[k] = wd.line.text()
         cfg["font_file"] = self._font_file
+        cfg["pos_ref_size"] = list(getattr(self, "_pos_ref_size", get_canvas_size()))
         return cfg
+
+    def adapt_to_canvas(self, cw: int, ch: int):
+        ref = getattr(self, "_pos_ref_size", None)
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh = float(ref[0]), float(ref[1])
+        else:
+            rw, rh = float(REF_W), float(REF_H)
+        if abs(rw - cw) > 1 or abs(rh - ch) > 1:
+            self._loading = True
+            try:
+                self.w["pos_x"].setValue(int(round(self.w["pos_x"].value() * (cw / rw))))
+                self.w["pos_y"].setValue(int(round(self.w["pos_y"].value() * (ch / rh))))
+            finally:
+                self._loading = False
+        self._pos_ref_size = [cw, ch]
 
     def set_cfg(self, cfg):
         base = default_card(self.kind)
         base.update(cfg or {})
+        cw, ch = get_canvas_size()
+        ref = base.get("pos_ref_size")
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh = float(ref[0]), float(ref[1])
+        else:
+            rw, rh = float(REF_W), float(REF_H)
+        if abs(rw - cw) > 1 or abs(rh - ch) > 1:
+            base["pos_x"] = int(round(float(base.get("pos_x", 540)) * (cw / rw)))
+            base["pos_y"] = int(round(float(base.get("pos_y", 960)) * (ch / rh)))
+        self._pos_ref_size = [cw, ch]
         self._loading = True
         self._font_file = base.get("font_file", "")
         if self._font_file:
@@ -2168,15 +2474,64 @@ class CardEditor(QWidget):
             return
         self.apply_preset_by_name(name)
 
+    def _copy_all_preset_names(self):
+        names = ordered_preset_names(self.kind)
+        if not names:
+            QMessageBox.information(self, "提示", "当前没有可复制的预设名称。")
+            return
+        QApplication.clipboard().setText("\n".join(names))
+        QMessageBox.information(
+            self, "预设名称已复制",
+            f"已将全部 {len(names)} 个{'标题' if self.kind == 'title' else '电话'}卡片预设名称复制到剪贴板（每行一个）！\n\n"
+            f"现在可以直接在 Excel / 表格中按 Ctrl+V 粘贴，用来批量配置每个任务的预设。"
+        )
+
+    def _on_manager_apply(self, name):
+        u = self.duet_ui
+        if u and getattr(u, "tasks", None):
+            # 在管理预设面板点击应用时，自动确保作用于「仅当前任务」，这样切任务套用互不覆盖
+            if hasattr(u, "rb_task") and not u.rb_task.isChecked():
+                u.rb_global.blockSignals(True)
+                u.rb_task.blockSignals(True)
+                u.rb_task.setChecked(True)
+                u.rb_global.blockSignals(False)
+                u.rb_task.blockSignals(False)
+        self.apply_preset_by_name(name)
+        self.sync_preset_manager(select_preset=name)
+
+    def sync_preset_manager(self, select_preset=None):
+        dlg = getattr(self, "_preset_mgr_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            dlg.sync_from_duet_ui(select_preset=select_preset)
+
     def _open_preset_manager(self):
-        dlg = PresetManagerDialog(self.kind, self.cmb_preset.currentData() or "", self)
+        dlg = getattr(self, "_preset_mgr_dlg", None)
+        if dlg is not None:
+            dlg.order = ordered_preset_names(self.kind)
+            dlg._rebuild()
+            dlg.sync_from_duet_ui(select_preset=self.cmb_preset.currentData() or None)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+        dlg = PresetManagerDialog(self.kind, self.cmb_preset.currentData() or "", self, duet_ui=self.duet_ui)
+        self._preset_mgr_dlg = dlg
         dlg.presetsChanged.connect(self.reload_presets)
-        dlg.applyRequested.connect(self.apply_preset_by_name)
-        dlg.exec()
-        self.reload_presets()
+        dlg.applyRequested.connect(self._on_manager_apply)
+        dlg.finished.connect(lambda *_: self.reload_presets())
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _get_preset_cfg_to_save(self):
         cfg = self.get_cfg()
+        ref = cfg.get("pos_ref_size")
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh = float(ref[0]), float(ref[1])
+            if abs(rw - REF_W) > 1 or abs(rh - REF_H) > 1:
+                cfg["pos_x"] = int(round(float(cfg.get("pos_x", 540)) * (REF_W / rw)))
+                cfg["pos_y"] = int(round(float(cfg.get("pos_y", 960)) * (REF_H / rh)))
+        cfg.pop("pos_ref_size", None)
         cfg["_kind"] = self.kind
         cfg["_is_user"] = True
         try:
@@ -2598,19 +2953,31 @@ class DuetVideoUI(QWidget):
             self.templates = [default_template()]
             _save_json("templates.json", self.templates)
         self.settings = _load_json("settings.json", {})
-        if not self.settings.get("layout_presets_v4"):
-            # 升级：把多格 / 画中画版式增量加入模板库
+        if not self.settings.get("layout_presets_v6"):
+            # 升级：把斜线分屏 / 多格 / 画中画版式增量加入模板库
             names = {t["name"] for t in self.templates}
+            diag_added = []
             for tab, name, cells in LAYOUT_PRESETS:
                 nm = f"{tab}·{name}"
                 if nm not in names:
-                    self.templates.append(template_from_cells(nm, cells))
+                    new_tpl = template_from_cells(nm, cells)
+                    if "斜线分屏" in nm:
+                        diag_added.append(new_tpl)
+                    else:
+                        self.templates.append(new_tpl)
+            if diag_added:
+                self.templates = diag_added + self.templates
             _save_json("templates.json", self.templates)
             self.settings["layout_presets_v1"] = True
             self.settings["layout_presets_v2"] = True
             self.settings["layout_presets_v3"] = True
             self.settings["layout_presets_v4"] = True
+            self.settings["layout_presets_v5"] = True
+            self.settings["layout_presets_v6"] = True
+            _save_json("settings.json", self.settings)
         set_cache_root(self.settings.get("cache_root", ""))
+        set_canvas_aspect(self.settings.get("aspect_ratio", "9:16"))
+        self.aspect_combos = []
         self.task_dir = ""
         self.active_tpl_name = self.settings.get("active_tpl", self.templates[0]["name"])
         if not self._tpl_by_name(self.active_tpl_name):
@@ -2624,6 +2991,107 @@ class DuetVideoUI(QWidget):
         self.update_align_status()
         self.redraw_tpl_canvas()
         self.redraw_preview()
+
+    # ── 画布尺寸(比例)工具 ──────────────────────────────────────────────────
+    def _make_aspect_combo(self):
+        cmb = QComboBox()
+        for key, label, w, h in ASPECT_RATIOS:
+            cmb.addItem(label, key)
+        idx = cmb.findData(get_canvas_aspect())
+        if idx >= 0:
+            cmb.setCurrentIndex(idx)
+        cmb.setToolTip("切换合成视频画布比例（9:16 / 3:4 / 1:1 / 4:3 / 16:9），所有画面模板与字幕卡片将自动适配")
+        cmb.currentIndexChanged.connect(lambda _, c=cmb: self._on_aspect_combo(c))
+        if not hasattr(self, "aspect_combos"):
+            self.aspect_combos = []
+        self.aspect_combos.append(cmb)
+        return cmb
+
+    def _on_aspect_combo(self, cmb):
+        aspect = cmb.currentData()
+        if not aspect:
+            return
+        self._set_aspect_ratio(aspect, res_idx=0)
+        self.save_settings()
+
+    def _refresh_res_combo(self, aspect: str, res_idx: int = 0):
+        if not hasattr(self, "cmb_res"):
+            return
+        items = ASPECT_RESOLUTIONS.get(aspect) or ASPECT_RESOLUTIONS["9:16"]
+        self.cmb_res.blockSignals(True)
+        self.cmb_res.clear()
+        for label, rw, rh in items:
+            self.cmb_res.addItem(label, (rw, rh))
+        self.cmb_res.setCurrentIndex(max(0, min(int(res_idx or 0), self.cmb_res.count() - 1)))
+        self.cmb_res.blockSignals(False)
+
+    @staticmethod
+    def _adapt_card_cfg_pos(cfg: dict, cw: int, ch: int):
+        ref = cfg.get("pos_ref_size")
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh = float(ref[0]), float(ref[1])
+        else:
+            rw, rh = float(REF_W), float(REF_H)
+        px_cur = int(cfg.get("pos_x", 540))
+        py_cur = int(cfg.get("pos_y", 960))
+        pf = cfg.get("pos_frac")
+        if isinstance(pf, (list, tuple)) and len(pf) == 2 and \
+                abs(int(round(pf[0] * rw)) - px_cur) <= 1 and abs(int(round(pf[1] * rh)) - py_cur) <= 1:
+            fx, fy = float(pf[0]), float(pf[1])
+        else:
+            fx, fy = px_cur / rw, py_cur / rh
+            cfg["pos_frac"] = [fx, fy]
+        if abs(rw - cw) > 1 or abs(rh - ch) > 1:
+            cfg["pos_x"] = int(round(fx * cw))
+            cfg["pos_y"] = int(round(fy * ch))
+        cfg["pos_ref_size"] = [cw, ch]
+
+    def _set_aspect_ratio(self, aspect: str, res_idx: int = 0):
+        self._pause_playback(snapshot=False)
+        self._play_ov = None
+        cw, ch = set_canvas_aspect(aspect)
+        aspect = get_canvas_aspect()
+        for c in getattr(self, "aspect_combos", []):
+            c.blockSignals(True)
+            idx = c.findData(aspect)
+            if idx >= 0:
+                c.setCurrentIndex(idx)
+            c.blockSignals(False)
+        self._refresh_res_combo(aspect, res_idx=res_idx)
+        if hasattr(self, "cell_spins"):
+            for k, rng in (("px", (0, cw)), ("py", (0, ch)), ("pw", (20, cw)), ("ph", (20, ch))):
+                sp = self.cell_spins.get(k)
+                if sp is not None:
+                    sp.blockSignals(True)
+                    sp.setRange(*rng)
+                    sp.blockSignals(False)
+        for sp_name in ("spin_diag_yl", "spin_diag_yr"):
+            sp = getattr(self, sp_name, None)
+            if sp is not None:
+                sp.blockSignals(True)
+                margin = max(20, int(round(ch * 0.05)))
+                sp.setRange(margin, ch - margin)
+                sp.blockSignals(False)
+        for editor in (getattr(self, "title_editor", None), getattr(self, "phone_editor", None)):
+            if editor is not None:
+                editor.adapt_to_canvas(cw, ch)
+        for attr in ("global_title_cfg", "global_phone_cfg"):
+            cfg = getattr(self, attr, None)
+            if isinstance(cfg, dict):
+                self._adapt_card_cfg_pos(cfg, cw, ch)
+        for t in getattr(self, "tasks", []) or []:
+            for key in ("title_cfg", "phone_cfg"):
+                if isinstance(t.get(key), dict):
+                    self._adapt_card_cfg_pos(t[key], cw, ch)
+        if hasattr(self, "cmb_tpl_material"):
+            self.refresh_tpl_combos()
+        if hasattr(self, "tpl_list") and self.tpl_list.count() > 0:
+            self.refresh_tpl_library(select=self.edit_tpl.get("name"))
+        if hasattr(self, "tpl_canvas"):
+            self.tpl_canvas.update()
+        if hasattr(self, "preview_canvas"):
+            self.preview_canvas.update()
+            self.redraw_preview()
 
     # ── 模板工具 ───────────────────────────────────────────────────────────
     def _tpl_by_name(self, name):
@@ -2702,8 +3170,13 @@ class DuetVideoUI(QWidget):
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        # 模板选择
+        # 尺寸与模板选择
         tpl_row = QHBoxLayout()
+        tpl_row.addWidget(QLabel("📐 视频尺寸:"))
+        self.cmb_aspect_material = self._make_aspect_combo()
+        self.cmb_aspect_material.setMinimumWidth(195)
+        tpl_row.addWidget(self.cmb_aspect_material)
+        tpl_row.addSpacing(12)
         tpl_row.addWidget(QLabel("🧩 画面模板:"))
         self.cmb_tpl_material = QComboBox()
         self.cmb_tpl_material.setMinimumWidth(220)
@@ -3064,7 +3537,7 @@ class DuetVideoUI(QWidget):
         self.tpl_canvas.cellsChanged.connect(self._on_cells_dragged)
         self.tpl_canvas.cellSelected.connect(self._on_canvas_cell_selected)
         mv.addWidget(self.tpl_canvas, 1)
-        self.lbl_tpl_hint = QLabel("浅粉 = 主视频，浅蓝/浅绿/浅橙/浅紫 = 人物视频1/2/3/4。导入素材后会显示第一组视频的真实画面。")
+        self.lbl_tpl_hint = QLabel("浅粉 = 主视频，浅蓝/浅绿/浅橙/浅紫 = 人物视频1/2/3/4。黄线（包括画布四周的外边）都可以拖动，把格子往里收就能留出背景区域。")
         self.lbl_tpl_hint.setWordWrap(True)
         self.lbl_tpl_hint.setStyleSheet("color:#718096;")
         mv.addWidget(self.lbl_tpl_hint)
@@ -3072,17 +3545,36 @@ class DuetVideoUI(QWidget):
 
         # 右：参数
         right = _card()
-        right.setFixedWidth(320)
+        right.setFixedWidth(350)
         rv = QVBoxLayout(right)
         rv.addWidget(_card_title("⚙️ 排版参数"))
         self.lbl_tpl_name = QLabel("")
         self.lbl_tpl_name.setStyleSheet("color:#3182CE; font-weight:bold;")
+        self.lbl_tpl_name.setWordWrap(True)
         rv.addWidget(self.lbl_tpl_name)
+
+        # 参数区放进可上下滚动的区域，避免控件被压扁、文字显示不全
+        param_scroll = QScrollArea()
+        param_scroll.setWidgetResizable(True)
+        param_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        param_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        param_inner = QWidget()
+        param_inner.setObjectName("tplParamInner")
+        param_inner.setStyleSheet("#tplParamInner { background: transparent; }")
+        param_scroll.viewport().setAutoFillBackground(False)
+        param_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        sv = QVBoxLayout(param_inner)
+        sv.setContentsMargins(0, 0, 6, 0)
+        sv.setSpacing(10)
+        param_scroll.setWidget(param_inner)
+        rv.addWidget(param_scroll, 1)
+
         form = QFormLayout()
+        form.setVerticalSpacing(10)
         self.cmb_cell = QComboBox()
         self.cmb_cell.currentIndexChanged.connect(self._on_cell_pick)
         form.addRow("选择格子:", self.cmb_cell)
-        rv.addLayout(form)
+        sv.addLayout(form)
 
         gb = QGroupBox("🔲 当前格子")
         f = QFormLayout(gb)
@@ -3108,16 +3600,89 @@ class DuetVideoUI(QWidget):
             sp.valueChanged.connect(self._on_tpl_param)
             f.addRow(lbl + ":", sp)
             self.cell_spins[key] = sp
-        self.chk_cell_pip = QCheckBox("画中画小窗（浮在其它格子上面，可自由拖动）")
+        self.chk_cell_pip = QCheckBox("画中画小窗（可自由拖动）")
+        self.chk_cell_pip.setToolTip("勾选后这个格子会浮在其它格子上面，可以在画布上自由拖动、拖右下角缩放")
         self.chk_cell_pip.toggled.connect(self._on_tpl_param)
         f.addRow("", self.chk_cell_pip)
-        rv.addWidget(gb)
-        rv.addStretch()
+        sv.addWidget(gb)
+
+        gb2 = QGroupBox("🎨 画面整体")
+        f2 = QFormLayout(gb2)
+        self.cmb_aspect_tpl = self._make_aspect_combo()
+        f2.addRow("视频尺寸:", self.cmb_aspect_tpl)
+        self.btn_tpl_bg = ColorButton("#000000")
+        self.btn_tpl_bg.setToolTip("格子没有覆盖到的区域（例如底部留白）的背景颜色")
+        self.btn_tpl_bg.colorChanged.connect(self._on_tpl_param)
+        f2.addRow("背景颜色:", self.btn_tpl_bg)
+        self.spin_div_w = QSpinBox()
+        self.spin_div_w.setRange(0, 80)
+        self.spin_div_w.setSuffix(" px")
+        self.spin_div_w.setToolTip("只画在格子与格子拼接的地方（含斜线接缝），画布四周不画；0 = 不显示")
+        self.spin_div_w.valueChanged.connect(self._on_tpl_param)
+        f2.addRow("分隔线宽度:", self.spin_div_w)
+        self.btn_div_color = ColorButton("#FFFFFF")
+        self.btn_div_color.colorChanged.connect(self._on_tpl_param)
+        f2.addRow("分隔线颜色:", self.btn_div_color)
+        sv.addWidget(gb2)
+
+        self.gb_diag = QGroupBox("📐 斜线分割调节")
+        f_diag = QFormLayout(self.gb_diag)
+        self.spin_diag_yl = QSpinBox()
+        self.spin_diag_yl.setRange(96, CANVAS_H - 96)
+        self.spin_diag_yl.setSingleStep(20)
+        self.spin_diag_yl.setSuffix(" px")
+        self.spin_diag_yl.setToolTip("斜线在画布左边缘的上下位置（也可直接拖动预览图左侧黄色圆点）")
+        self.spin_diag_yl.valueChanged.connect(self._on_tpl_param)
+        f_diag.addRow("斜线左端 Y:", self.spin_diag_yl)
+        self.spin_diag_yr = QSpinBox()
+        self.spin_diag_yr.setRange(96, CANVAS_H - 96)
+        self.spin_diag_yr.setSingleStep(20)
+        self.spin_diag_yr.setSuffix(" px")
+        self.spin_diag_yr.setToolTip("斜线在画布右边缘的上下位置（也可直接拖动预览图右侧黄色圆点）")
+        self.spin_diag_yr.valueChanged.connect(self._on_tpl_param)
+        f_diag.addRow("斜线右端 Y:", self.spin_diag_yr)
+        diag_btns = QHBoxLayout()
+        b_diag_flip = QPushButton("🔄 左右斜向翻转")
+        b_diag_flip.setToolTip("在「左低右高 (/)」与「左高右低 (\\)」之间一键翻转")
+        b_diag_flip.clicked.connect(self._flip_diag_slope)
+        b_diag_swap = QPushButton("⇅ 上下视频互换")
+        b_diag_swap.setToolTip("一键互换上半区与下半区播放的视频源")
+        b_diag_swap.clicked.connect(self._swap_diag_sources)
+        diag_btns.addWidget(b_diag_flip)
+        diag_btns.addWidget(b_diag_swap)
+        f_diag.addRow("", diag_btns)
+        sv.addWidget(self.gb_diag)
+        sv.addStretch()
+
+        # 统一行高与间距：每一行至少 36px，标签不被截断
+        for fl in (form, f, f2, f_diag):
+            fl.setVerticalSpacing(10)
+            fl.setHorizontalSpacing(10)
+            fl.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            fl.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            for r in range(fl.rowCount()):
+                for role in (QFormLayout.ItemRole.LabelRole, QFormLayout.ItemRole.FieldRole):
+                    item = fl.itemAt(r, role)
+                    w = item.widget() if item else None
+                    if w is None:
+                        continue
+                    if isinstance(w, QLabel):
+                        w.setMinimumHeight(36)
+                    elif isinstance(w, (QComboBox, QSpinBox)):
+                        w.setMinimumHeight(36)
+                    elif isinstance(w, ColorButton):
+                        w.setFixedHeight(36)
+                        w.btn_color.setFixedHeight(34)
+                        w.btn_drop.setFixedSize(34, 34)
+        self.chk_cell_pip.setMinimumHeight(30)
+
         b_save = QPushButton("💾 保存模板")
         b_save.setProperty("class", "ActionBtn")
+        b_save.setMinimumHeight(38)
         b_save.clicked.connect(self._tpl_save)
         rv.addWidget(b_save)
         b_use = QPushButton("✅ 保存并设为当前使用模板")
+        b_use.setMinimumHeight(36)
         b_use.clicked.connect(self._tpl_save_and_use)
         rv.addWidget(b_use)
         lay.addWidget(right)
@@ -3142,34 +3707,64 @@ class DuetVideoUI(QWidget):
             return
         t = json.loads(json.dumps(self.templates[row]))
         # 旧版上下分屏模板统一转换为格子格式编辑（渲染结果不变）
-        self.edit_tpl = {"name": t["name"], "cells": json.loads(json.dumps(tpl_cells(t)))}
+        self.edit_tpl = {"name": t["name"], "cells": json.loads(json.dumps(tpl_cells(t))),
+                         "bg_color": tpl_bg_color(t),
+                         "divider": {"width": tpl_divider(t)[0], "color": tpl_divider(t)[1]}}
         self._sel_cell = 0
         self._load_tpl_editor()
 
     def _tpl_editor_widgets(self):
-        return [self.cmb_cell, self.cmb_cell_src, self.cmb_cell_fill, self.chk_cell_pip, *self.cell_spins.values()]
+        return [self.cmb_cell, self.cmb_cell_src, self.cmb_cell_fill, self.chk_cell_pip,
+                self.spin_div_w, self.spin_diag_yl, self.spin_diag_yr, *self.cell_spins.values()]
 
     def _load_tpl_editor(self):
         t = self.edit_tpl
         cells = t["cells"]
+        cw, ch = get_canvas_size(t)
         self._sel_cell = max(0, min(getattr(self, "_sel_cell", 0), len(cells) - 1))
         for w in self._tpl_editor_widgets():
             w.blockSignals(True)
-        self.lbl_tpl_name.setText(f"正在编辑：{t['name']}（{len(cells)} 个格子）")
+        for k, rng in (("px", (0, cw)), ("py", (0, ch)), ("pw", (20, cw)), ("ph", (20, ch))):
+            self.cell_spins[k].setRange(*rng)
+        margin = max(20, int(round(ch * 0.05)))
+        self.spin_diag_yl.setRange(margin, ch - margin)
+        self.spin_diag_yr.setRange(margin, ch - margin)
+
+        self.lbl_tpl_name.setText(f"正在编辑：{t['name']}（{len(cells)} 个格子 · {get_canvas_aspect(t)}）")
         self.cmb_cell.clear()
         for i, cl in enumerate(cells):
-            kind = "小窗" if cl.get("pip") else "格子"
+            kind = "小窗" if cl.get("pip") else ("斜切区" if cl.get("poly") else "格子")
             self.cmb_cell.addItem(f"{kind} {i + 1}：{SRC_LABELS.get(cl.get('src'), cl.get('src'))}", i)
         self.cmb_cell.setCurrentIndex(self._sel_cell)
         cl = cells[self._sel_cell]
         self.cmb_cell_src.setCurrentIndex(max(0, self.cmb_cell_src.findData(cl.get("src"))))
         self.cmb_cell_fill.setCurrentIndex(max(0, self.cmb_cell_fill.findData(cl.get("fill", "cover"))))
-        x, y, w, h = cell_rect_px(cl)
-        vals = {"ox": cl.get("ox", 0), "oy": cl.get("oy", 0), "px": x, "py": y, "pw": w, "ph": h,
+        x, y, w, h = cell_rect_px(cl, t)
+        ref = cl.get("ref_size")
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh = float(ref[0]), float(ref[1])
+        else:
+            rw, rh = float(REF_W), float(REF_H)
+        ox_disp = int(round(float(cl.get("ox", 0)) * (cw / rw)))
+        oy_disp = int(round(float(cl.get("oy", 0)) * (ch / rh)))
+        vals = {"ox": ox_disp, "oy": oy_disp, "px": x, "py": y, "pw": w, "ph": h,
                 "border": cl.get("border", 0)}
         for k, sp in self.cell_spins.items():
             sp.setValue(int(vals[k]))
+        is_poly = bool(cl.get("poly"))
+        for k in ("px", "py", "pw", "ph", "border"):
+            self.cell_spins[k].setEnabled(not is_poly)
+        self.chk_cell_pip.setEnabled(not is_poly)
         self.chk_cell_pip.setChecked(bool(cl.get("pip")))
+        self.btn_tpl_bg.set_color(tpl_bg_color(t))
+        dw_, dc_ = tpl_divider(t)
+        self.spin_div_w.setValue(dw_)
+        self.btn_div_color.set_color(dc_)
+        diag = tpl_diag_ys(cells)
+        self.gb_diag.setVisible(diag is not None)
+        if diag is not None:
+            self.spin_diag_yl.setValue(int(round(diag[0] * ch)))
+            self.spin_diag_yr.setValue(int(round(diag[1] * ch)))
         for w in self._tpl_editor_widgets():
             w.blockSignals(False)
         self.redraw_tpl_canvas()
@@ -3178,20 +3773,56 @@ class DuetVideoUI(QWidget):
         cells = self.edit_tpl.get("cells")
         if not cells:
             return
+        cw, ch = get_canvas_size(self.edit_tpl)
+        self.edit_tpl["bg_color"] = self.btn_tpl_bg.color()
+        self.edit_tpl["divider"] = {"width": self.spin_div_w.value(), "color": self.btn_div_color.color()}
+        diag = tpl_diag_ys(cells)
+        if diag is not None:
+            yl = self.spin_diag_yl.value() / ch
+            yr = self.spin_diag_yr.value() / ch
+            set_tpl_diag_ys(cells, yl, yr)
         cl = cells[self._sel_cell]
         cl["src"] = self.cmb_cell_src.currentData()
-        cl["fill"] = self.cmb_cell_fill.currentData()
-        cl["ox"] = self.cell_spins["ox"].value()
-        cl["oy"] = self.cell_spins["oy"].value()
-        cl["border"] = self.cell_spins["border"].value()
-        cl["pip"] = self.chk_cell_pip.isChecked()
-        x, y, w, h = cell_rect_px(cl)
-        sp = self.cell_spins
-        if (sp["px"].value(), sp["py"].value(), sp["pw"].value(), sp["ph"].value()) != (x, y, w, h):
-            cl["x"] = sp["px"].value() / CANVAS_W
-            cl["y"] = sp["py"].value() / CANVAS_H
-            cl["w"] = min(sp["pw"].value(), CANVAS_W - sp["px"].value()) / CANVAS_W
-            cl["h"] = min(sp["ph"].value(), CANVAS_H - sp["py"].value()) / CANVAS_H
+        ref = cl.get("ref_size")
+        if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+            rw, rh = float(ref[0]), float(ref[1])
+        else:
+            rw, rh = float(REF_W), float(REF_H)
+        ox_disp = int(round(float(cl.get("ox", 0)) * (cw / rw)))
+        oy_disp = int(round(float(cl.get("oy", 0)) * (ch / rh)))
+        new_fill = self.cmb_cell_fill.currentData()
+        new_ox = self.cell_spins["ox"].value()
+        new_oy = self.cell_spins["oy"].value()
+        if (new_ox, new_oy, new_fill) != (ox_disp, oy_disp, cl.get("fill", "cover")):
+            cl["fill"] = new_fill
+            cl["ox"] = new_ox
+            cl["oy"] = new_oy
+            cl["ref_size"] = [cw, ch]
+        if not cl.get("poly"):
+            cl["border"] = self.cell_spins["border"].value()
+            cl["pip"] = self.chk_cell_pip.isChecked()
+            x, y, w, h = cell_rect_px(cl, self.edit_tpl)
+            sp = self.cell_spins
+            if (sp["px"].value(), sp["py"].value(), sp["pw"].value(), sp["ph"].value()) != (x, y, w, h):
+                cl["x"] = sp["px"].value() / cw
+                cl["y"] = sp["py"].value() / ch
+                cl["w"] = min(sp["pw"].value(), cw - sp["px"].value()) / cw
+                cl["h"] = min(sp["ph"].value(), ch - sp["py"].value()) / ch
+
+    def _flip_diag_slope(self):
+        cells = self.edit_tpl.get("cells")
+        diag = tpl_diag_ys(cells)
+        if diag is None:
+            return
+        set_tpl_diag_ys(cells, diag[1], diag[0])
+        self._load_tpl_editor()
+
+    def _swap_diag_sources(self):
+        cells = self.edit_tpl.get("cells")
+        if not cells or len(cells) < 2:
+            return
+        cells[0]["src"], cells[1]["src"] = cells[1].get("src", "person"), cells[0].get("src", "viral")
+        self._load_tpl_editor()
 
     def _on_tpl_param(self, *a):
         self._read_tpl_editor()
@@ -3210,13 +3841,21 @@ class DuetVideoUI(QWidget):
 
     def _on_cells_dragged(self, cells):
         self.edit_tpl["cells"] = cells
+        _, ch = get_canvas_size(self.edit_tpl)
         # 只更新数值框，不重建画布格子（避免打断拖动）
         cl = cells[self._sel_cell]
-        x, y, w, h = cell_rect_px(cl)
+        x, y, w, h = cell_rect_px(cl, self.edit_tpl)
         for k, v in (("px", x), ("py", y), ("pw", w), ("ph", h)):
             self.cell_spins[k].blockSignals(True)
             self.cell_spins[k].setValue(v)
             self.cell_spins[k].blockSignals(False)
+        diag = tpl_diag_ys(cells)
+        if diag is not None:
+            for sp, val in ((self.spin_diag_yl, int(round(diag[0] * ch))),
+                            (self.spin_diag_yr, int(round(diag[1] * ch)))):
+                sp.blockSignals(True)
+                sp.setValue(val)
+                sp.blockSignals(False)
         self.redraw_tpl_canvas(update_cells=False)
 
     def _on_split_dragged(self, ratio):
@@ -3417,6 +4056,9 @@ class DuetVideoUI(QWidget):
         mid = _card()
         mv = QVBoxLayout(mid)
         top = QHBoxLayout()
+        top.addWidget(QLabel("尺寸:"))
+        self.cmb_aspect_cards = self._make_aspect_combo()
+        top.addWidget(self.cmb_aspect_cards)
         top.addWidget(QLabel("模板:"))
         self.cmb_tpl_cards = QComboBox()
         self.cmb_tpl_cards.setIconSize(QSize(18, 32))
@@ -3472,8 +4114,8 @@ class DuetVideoUI(QWidget):
         self.card_tabs.currentChanged.connect(self._on_card_tab_changed)
         rv.addWidget(self.card_tabs, 1)
         
-        self.title_editor = CardEditor("title")
-        self.phone_editor = CardEditor("phone")
+        self.title_editor = CardEditor("title", self, duet_ui=self)
+        self.phone_editor = CardEditor("phone", self, duet_ui=self)
         self.title_editor.presetApplied.connect(lambda n: self._on_editor_preset("title", n))
         self.phone_editor.presetApplied.connect(lambda n: self._on_editor_preset("phone", n))
         self.card_tabs.addTab(self._wrap_editor("title", self.title_editor), "🅰 标题卡片")
@@ -3606,16 +4248,14 @@ class DuetVideoUI(QWidget):
             w.blockSignals(False)
         self._refresh_adj_sources()
         
-        # Update Scope Radio
+        # Update Scope Radio (keep rb_task if user selected it so switching tasks while applying presets stays per-task)
         has_task_cfg = "title_cfg" in t or "phone_cfg" in t
-        self.rb_global.blockSignals(True)
-        self.rb_task.blockSignals(True)
-        if has_task_cfg:
+        if has_task_cfg and not self.rb_task.isChecked():
+            self.rb_global.blockSignals(True)
+            self.rb_task.blockSignals(True)
             self.rb_task.setChecked(True)
-        else:
-            self.rb_global.setChecked(True)
-        self.rb_global.blockSignals(False)
-        self.rb_task.blockSignals(False)
+            self.rb_global.blockSignals(False)
+            self.rb_task.blockSignals(False)
         
         for kind, editor in [("title", self.title_editor), ("phone", self.phone_editor)]:
             editor.blockSignals(True)
@@ -3625,6 +4265,7 @@ class DuetVideoUI(QWidget):
                 editor.set_cfg(getattr(self, f"global_{kind}_cfg"))
             editor.blockSignals(False)
             editor.select_preset_name(t.get(f"{kind}_preset", "") if f"{kind}_cfg" in t else "")
+            editor.sync_preset_manager(select_preset=t.get(f"{kind}_preset", "") or None)
             
         self.time_slider.blockSignals(True)
         self.time_slider.setRange(0, max(1, int(t["duration"] * 10)))
@@ -3799,7 +4440,12 @@ class DuetVideoUI(QWidget):
     def _on_editor_preset(self, kind, name):
         if not self.tasks or self.rb_global.isChecked():
             return
-        self.tasks[self.cur_task][f"{kind}_preset"] = name
+        t = self.tasks[self.cur_task]
+        t[f"{kind}_preset"] = name
+        editor = self.title_editor if kind == "title" else self.phone_editor
+        t[f"{kind}_cfg"] = editor.get_cfg()
+        editor.sync_preset_manager(select_preset=name)
+        self.redraw_preview()
 
     def _open_batch_table(self):
         if not self.tasks:
@@ -3968,7 +4614,8 @@ class DuetVideoUI(QWidget):
     def _build_play_overlays(self, task):
         tpl = self.active_tpl()
         split_y = box_layout(tpl)["split_y"]
-        sw, sh = int(round(CANVAS_W * PLAY_SCALE)), int(round(CANVAS_H * PLAY_SCALE))
+        cw, ch = get_canvas_size(tpl)
+        sw, sh = int(round(cw * PLAY_SCALE)), int(round(ch * PLAY_SCALE))
 
         def sc(img):
             if img is None or img.isNull():
@@ -4195,11 +4842,10 @@ class DuetVideoUI(QWidget):
         pr.addWidget(self.txt_export_dir)
         pr.addWidget(bb)
         form.addRow("导出文件夹:", pr)
+        self.cmb_aspect_export = self._make_aspect_combo()
+        form.addRow("视频尺寸:", self.cmb_aspect_export)
         self.cmb_res = QComboBox()
-        self.cmb_res.addItem("1080 x 1920（推荐）", (1080, 1920))
-        self.cmb_res.addItem("720 x 1280", (720, 1280))
-        self.cmb_res.addItem("1440 x 2560", (1440, 2560))
-        self.cmb_res.addItem("2160 x 3840（4K）", (2160, 3840))
+        self._refresh_res_combo(get_canvas_aspect(), res_idx=0)
         form.addRow("分辨率:", self.cmb_res)
         self.cmb_quality = QComboBox()
         self.cmb_quality.addItem("高画质", 18)
@@ -4572,7 +5218,7 @@ class DuetVideoUI(QWidget):
     #  设置保存
     # ══════════════════════════════════════════════════════════════════════
     # 全局 settings.json 只放软件偏好；每次任务的全部参数放在它自己的对齐文件夹 project.json
-    _PREF_KEYS = ("export_dir", "res_idx", "quality_idx", "enc_idx", "workers", "volume",
+    _PREF_KEYS = ("aspect_ratio", "export_dir", "res_idx", "quality_idx", "enc_idx", "workers", "volume",
                   "global_speed", "max_3min", "mute_person", "mute_viral")
 
     def _load_settings(self):
@@ -4603,6 +5249,8 @@ class DuetVideoUI(QWidget):
         self.list_viral.clear()
         self.tasks = []
         self.aligned = False
+        aspect = s.get("aspect_ratio") or get_canvas_aspect()
+        self._set_aspect_ratio(aspect, res_idx=s.get("res_idx", 0))
         if "title_cfg" in s:
             self.global_title_cfg = s["title_cfg"]
             self.title_editor.set_cfg(s["title_cfg"])
@@ -4649,6 +5297,7 @@ class DuetVideoUI(QWidget):
         """当前这次任务的全部参数。"""
         return {
             "version": 1,
+            "aspect_ratio": get_canvas_aspect(),
             "active_tpl": self.active_tpl_name,
             "person_videos": self.list_person.paths(),
             "viral_videos": self.list_viral.paths(),
@@ -4690,6 +5339,8 @@ class DuetVideoUI(QWidget):
             "layout_presets_v2": True,
             "layout_presets_v3": True,
             "layout_presets_v4": True,
+            "layout_presets_v5": True,
+            "layout_presets_v6": True,
         }
         prefs.update({k: state[k] for k in self._PREF_KEYS})
         if not has_proj:

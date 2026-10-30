@@ -7,7 +7,7 @@ token = os.environ.get("GITHUB_TOKEN") or open(os.path.join(os.path.dirname(os.p
 repo_owner = "dedeyuyu"
 repo_name = "VideoTools"
 
-installer_path = "output_installer/VideoTools_v1.5.16_Setup.exe"
+installer_path = "output_installer/VideoTools_v1.5.17_Setup.exe"
 
 headers = {
     "Authorization": f"token {token}",
@@ -16,9 +16,9 @@ headers = {
 
 # Create release
 release_payload = {
-    "tag_name": "v1.5.16",
-    "name": "VideoTools Release v1.5.16",
-    "body": "### v1.5.16 更新内容\n- **合拍预览支持连续播放**：字幕卡片微调新增「▶ 播放 / ⏸ 暂停」，多路视频同步播放并实时叠加模板、卡片和水印；人物视频按倍速循环（仍为仅标记对齐，无需缓存），播放中可拖动时间轴跳转、边播边改卡片\n- **替换当前任务的视频**：「文案和微调」中可单独替换某组任务的主视频 / 人物视频1~4，文案、卡片、微调保留，时间线标记与素材列表同步更新，导出以替换后为准\n- **卡片预设管理面板**：搜索、多选批量删除、置顶/上移/下移/置底、拖拽排序、重命名、一键应用；内置预设也可删除并可恢复\n- **四列表格批量编辑**：标题文本 / 电话文本 / 标题预设 / 电话预设，每列支持清空与逐行粘贴，也支持从 Excel 直接粘贴多列；预设留空则不更改",
+    "tag_name": "v1.5.17",
+    "name": "VideoTools Release v1.5.17",
+    "body": "### v1.5.17 更新内容\n- **多画幅比例支持（9:16 / 3:4 / 1:1 / 4:3 / 16:9）**：四个步骤页顶栏同步切换视频尺寸，720P / 1080P / 2K / 4K 导出分辨率随比例自动联动，所有分屏模板、斜线模板、卡片与水印自动自适应画幅并防露黑边\n- **斜线分屏排版**：新增 4 套斜线分屏内置模板（左低右高 / 左高右低 × 主上人下 / 人上主下），支持多边形斜向裁剪、画布直接拖拽斜线两端控制点与精确调整左/右端点高度\n- **笔刷裂纹文字与底条特效**：新增笔刷裂纹、折纸褶皱、复古斑驳纹理与 3 款笔刷双色内置预设\n- **预设管理与接缝分隔线升级**：新增板块接缝带色分隔线（可调颜色与宽度）、预设名称一键导出到 Excel、非模态预设管理窗口支持边切换任务边搜索应用，排版参数区支持滚动浏览",
     "draft": False,
     "prerelease": False
 }
@@ -47,7 +47,7 @@ headers_upload = {
 
 with open(installer_path, "rb") as f:
     upload_resp = requests.post(
-        f"{upload_url}?name=VideoTools_v1.5.16_Setup.exe",
+        f"{upload_url}?name=VideoTools_v1.5.17_Setup.exe",
         headers=headers_upload,
         data=f
     )

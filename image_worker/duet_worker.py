@@ -15,8 +15,78 @@ import math
 import json
 import subprocess
 
+REF_W = 1080
+REF_H = 1920
 CANVAS_W = 1080
 CANVAS_H = 1920
+
+ASPECT_RATIOS = [
+    ("9:16", "9:16 竖屏 (1080×1920)", 1080, 1920),
+    ("3:4",  "3:4 竖屏 (1080×1440)",  1080, 1440),
+    ("1:1",  "1:1 方屏 (1080×1080)",  1080, 1080),
+    ("4:3",  "4:3 横屏 (1440×1080)",  1440, 1080),
+    ("16:9", "16:9 横屏 (1920×1080)", 1920, 1080),
+]
+
+ASPECT_RESOLUTIONS = {
+    "9:16": [
+        ("1080 × 1920（1080P 推荐）", 1080, 1920),
+        ("720 × 1280（720P 快速）",   720,  1280),
+        ("1440 × 2560（2K 高清）",    1440, 2560),
+        ("2160 × 3840（4K 超清）",    2160, 3840),
+    ],
+    "3:4": [
+        ("1080 × 1440（1080P 推荐）", 1080, 1440),
+        ("720 × 960（720P 快速）",    720,  960),
+        ("1440 × 1920（2K 高清）",    1440, 1920),
+        ("2160 × 2880（4K 超清）",    2160, 2880),
+    ],
+    "1:1": [
+        ("1080 × 1080（1080P 推荐）", 1080, 1080),
+        ("720 × 720（720P 快速）",    720,  720),
+        ("1440 × 1440（2K 高清）",    1440, 1440),
+        ("2160 × 2160（4K 超清）",    2160, 2160),
+    ],
+    "4:3": [
+        ("1440 × 1080（1080P 推荐）", 1440, 1080),
+        ("960 × 720（720P 快速）",    960,  720),
+        ("1920 × 1440（2K 高清）",    1920, 1440),
+        ("2880 × 2160（4K 超清）",    2880, 2160),
+    ],
+    "16:9": [
+        ("1920 × 1080（1080P 推荐）", 1920, 1080),
+        ("1280 × 720（720P 快速）",   1280, 720),
+        ("2560 × 1440（2K 高清）",    2560, 1440),
+        ("3840 × 2160（4K 超清）",    3840, 2160),
+    ],
+}
+
+_ASPECT_MAP = {k: (w, h) for k, _, w, h in ASPECT_RATIOS}
+_CURRENT_ASPECT = "9:16"
+
+
+def set_canvas_aspect(aspect: str) -> tuple:
+    """设置全局画布比例（'9:16' / '3:4' / '1:1' / '4:3' / '16:9'），返回 (CANVAS_W, CANVAS_H)。"""
+    global _CURRENT_ASPECT, CANVAS_W, CANVAS_H
+    if aspect not in _ASPECT_MAP:
+        aspect = "9:16"
+    _CURRENT_ASPECT = aspect
+    CANVAS_W, CANVAS_H = _ASPECT_MAP[aspect]
+    return CANVAS_W, CANVAS_H
+
+
+def get_canvas_aspect(tpl: dict = None) -> str:
+    """获取当前画布比例；若 tpl 指定了有效 aspect 则优先返回 tpl['aspect']。"""
+    if isinstance(tpl, dict):
+        a = tpl.get("aspect")
+        if a in _ASPECT_MAP:
+            return a
+    return _CURRENT_ASPECT
+
+
+def get_canvas_size(tpl: dict = None) -> tuple:
+    """返回画布基准像素尺寸 (cw, ch)。"""
+    return _ASPECT_MAP.get(get_canvas_aspect(tpl), (1080, 1920))
 
 _NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
@@ -247,9 +317,95 @@ FILL_MODES = [("cover", "铺满格子（超出裁切）"), ("width", "等宽对�
               ("height", "等高对齐（高=格子高）"), ("contain", "完整显示（留黑边）")]
 
 
-def make_cell(src, x, y, w, h, fill="cover", pip=False, border=0):
-    return {"src": src, "x": x, "y": y, "w": w, "h": h, "fill": fill,
-            "ox": 0, "oy": 0, "pip": pip, "border": border}
+def make_cell(src, x, y, w, h, fill="cover", pip=False, border=0, poly=None):
+    c = {"src": src, "x": x, "y": y, "w": w, "h": h, "fill": fill,
+         "ox": 0, "oy": 0, "pip": pip, "border": border}
+    if poly:
+        c["poly"] = [[float(px), float(py)] for px, py in poly]
+    return c
+
+
+def make_diag_cells(top_src="viral", bot_src="person", y_left=0.745, y_right=0.255, fill="cover"):
+    """生成上下两格斜线分割版式：斜线从画布左边缘 (0, y_left) 连接到右边缘 (1, y_right)。"""
+    yl = max(0.05, min(0.95, float(y_left)))
+    yr = max(0.05, min(0.95, float(y_right)))
+    h_top = max(yl, yr)
+    y_bot = min(yl, yr)
+    poly_top = [[0.0, 0.0], [1.0, 0.0], [1.0, yr], [0.0, yl]]
+    poly_bot = [[0.0, yl], [1.0, yr], [1.0, 1.0], [0.0, 1.0]]
+    return [
+        make_cell(top_src, 0.0, 0.0, 1.0, h_top, fill=fill, poly=poly_top),
+        make_cell(bot_src, 0.0, y_bot, 1.0, 1.0 - y_bot, fill=fill, poly=poly_bot),
+    ]
+
+
+def tpl_diag_ys(cells: list):
+    """若前两个普通格子构成全宽斜线分割，返回 (y_left, y_right) 比例；否则返回 None。"""
+    if not cells or len(cells) < 2:
+        return None
+    c0, c1 = cells[0], cells[1]
+    if c0.get("pip") or c1.get("pip"):
+        return None
+    p0, p1 = c0.get("poly"), c1.get("poly")
+    if not p0 or not p1 or len(p0) != 4 or len(p1) != 4:
+        return None
+    try:
+        # 约定 p0 = [[0,0], [1,0], [1,yr], [0,yl]], p1 = [[0,yl], [1,yr], [1,1], [0,1]]
+        yl0, yr0 = float(p0[3][1]), float(p0[2][1])
+        yl1, yr1 = float(p1[0][1]), float(p1[1][1])
+        if abs(yl0 - yl1) < 0.01 and abs(yr0 - yr1) < 0.01:
+            return (yl0, yr0)
+    except Exception:
+        pass
+    return None
+
+
+def set_tpl_diag_ys(cells: list, y_left: float, y_right: float) -> bool:
+    """更新斜线分割模板的左右端点高度比例 (y_left, y_right)，同时同步两格的包围盒与多边形顶点。"""
+    if not cells or len(cells) < 2:
+        return False
+    yl = max(0.05, min(0.95, float(y_left)))
+    yr = max(0.05, min(0.95, float(y_right)))
+    c0, c1 = cells[0], cells[1]
+    h_top = max(yl, yr)
+    y_bot = min(yl, yr)
+    c0["x"], c0["y"], c0["w"], c0["h"] = 0.0, 0.0, 1.0, h_top
+    c0["poly"] = [[0.0, 0.0], [1.0, 0.0], [1.0, yr], [0.0, yl]]
+    c1["x"], c1["y"], c1["w"], c1["h"] = 0.0, y_bot, 1.0, 1.0 - y_bot
+    c1["poly"] = [[0.0, yl], [1.0, yr], [1.0, 1.0], [0.0, 1.0]]
+    return True
+
+
+def cell_poly_px(cell: dict, tpl: dict = None):
+    """若格子带有多边形裁剪顶点 poly（0~1 比例），返回画布像素坐标列表 [(x, y), ...]；否则返回 None。"""
+    poly = cell.get("poly") if cell else None
+    if not poly or len(poly) < 3:
+        return None
+    cw, ch = get_canvas_size(tpl)
+    return [(float(pt[0]) * cw, float(pt[1]) * ch) for pt in poly]
+
+
+def cell_label_rect_px(cell: dict, tpl: dict = None) -> tuple:
+    """返回格子用于绘制序号与文字标签的最佳像素矩形 (x, y, w, h)，针对斜切梯形自动偏向宽敞一侧。"""
+    x, y, w, h = cell_rect_px(cell, tpl)
+    poly = cell.get("poly")
+    if not poly or len(poly) != 4:
+        return x, y, w, h
+    cw, ch = get_canvas_size(tpl)
+    try:
+        # 顶格 [[0,0],[1,0],[1,yr],[0,yl]] 或 底格 [[0,yl],[1,yr],[1,1],[0,1]]
+        if abs(float(poly[0][1])) < 1e-3 and abs(float(poly[1][1])) < 1e-3:
+            yl, yr = float(poly[3][1]), float(poly[2][1])
+            cx = (0.36 if yl >= yr else 0.64) * cw
+            cy = ((yl + yr) * 0.25) * ch
+        else:
+            yl, yr = float(poly[0][1]), float(poly[1][1])
+            cx = (0.64 if yl >= yr else 0.36) * cw
+            cy = (0.5 + (yl + yr) * 0.25) * ch
+        bw, bh = w * 0.55, max(80.0, h * 0.42)
+        return cx - bw / 2, cy - bh / 2, bw, bh
+    except Exception:
+        return x, y, w, h
 
 
 def _layout_presets():
@@ -259,7 +415,14 @@ def _layout_presets():
     full = make_cell("viral", 0, 0, 1, 1)
     pip = lambda src, x: make_cell(src, x, py, pw, pw, pip=True, border=6)
     return [
+        ("常用", "斜线分屏（左低右高·主上人下）", make_diag_cells("viral", "person", 0.745, 0.255)),
+        ("常用", "斜线分屏（左低右高·人上主下）", make_diag_cells("person", "viral", 0.745, 0.255)),
+        ("常用", "斜线分屏（左高右低·主上人下）", make_diag_cells("viral", "person", 0.255, 0.745)),
+        ("常用", "斜线分屏（左高右低·人上主下）", make_diag_cells("person", "viral", 0.255, 0.745)),
         ("常用", "上1 / 下1", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, 1, .5)]),
+        ("常用", "左1 / 右1", [make_cell("viral", 0, 0, .5, 1), make_cell("person", .5, 0, .5, 1)]),
+        ("常用", "左右分屏（居中，底部留白）", [make_cell("viral", 0, .2, .5, .5625),
+                                         make_cell("person", .5, .2, .5, .5625)]),
         ("常用", "上1/3 / 下2/3", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, 1 - T)]),
         ("常用", "上2/3 / 下1/3", [make_cell("viral", 0, 0, 1, 2 * T), make_cell("person", 0, 2 * T, 1, T)]),
         ("常用", "纵向三等分", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, T),
@@ -301,21 +464,27 @@ LAYOUT_PRESETS = _layout_presets()
 
 def template_from_cells(name: str, cells: list) -> dict:
     import copy
-    return {"name": name, "cells": copy.deepcopy(cells)}
+    tpl = {"name": name, "cells": copy.deepcopy(cells)}
+    if tpl_diag_ys(cells) is not None:
+        tpl["divider"] = {"width": 8, "color": "#000000"}
+    return tpl
 
 
 def tpl_cells(tpl: dict) -> list:
     """统一返回格子列表；旧版「上下分屏」模板自动转换（渲染结果完全一致）。"""
     if tpl.get("cells"):
         return tpl["cells"]
-    split_px = max(50, min(CANVAS_H - 50, int(round(CANVAS_H * float(tpl.get("split", 0.5))))))
-    s = split_px / CANVAS_H
+    _, ch = get_canvas_size(tpl)
+    split_px = max(50, min(ch - 50, int(round(ch * float(tpl.get("split", 0.5))))))
+    s = split_px / ch
     top_src, bot_src = ("person", "viral") if tpl.get("order", "person_top") == "person_top" else ("viral", "person")
     out = []
     for src, y, h, key in ((top_src, 0.0, s, "top"), (bot_src, s, 1 - s, "bottom")):
         b = tpl.get(key, {}) or {}
         cell = make_cell(src, 0.0, y, 1.0, h, fill=b.get("fill", "width"))
         cell["ox"], cell["oy"] = int(b.get("ox", 0)), int(b.get("oy", 0))
+        if b.get("ref_size"):
+            cell["ref_size"] = list(b["ref_size"])
         out.append(cell)
     return out
 
@@ -324,12 +493,13 @@ def _ev(v: float) -> int:
     return int(round(v / 2.0)) * 2
 
 
-def cell_rect_px(cell: dict) -> tuple:
-    """格子在 1080x1920 画布上的像素矩形 (x, y, w, h)，全部取偶数，相邻格子无缝。"""
-    x1 = max(0, min(CANVAS_W, _ev(float(cell["x"]) * CANVAS_W)))
-    y1 = max(0, min(CANVAS_H, _ev(float(cell["y"]) * CANVAS_H)))
-    x2 = max(0, min(CANVAS_W, _ev((float(cell["x"]) + float(cell["w"])) * CANVAS_W)))
-    y2 = max(0, min(CANVAS_H, _ev((float(cell["y"]) + float(cell["h"])) * CANVAS_H)))
+def cell_rect_px(cell: dict, tpl: dict = None) -> tuple:
+    """格子在画布上的像素矩形 (x, y, w, h)，全部取偶数，相邻格子无缝。"""
+    cw, ch = get_canvas_size(tpl)
+    x1 = max(0, min(cw, _ev(float(cell["x"]) * cw)))
+    y1 = max(0, min(ch, _ev(float(cell["y"]) * ch)))
+    x2 = max(0, min(cw, _ev((float(cell["x"]) + float(cell["w"])) * cw)))
+    y2 = max(0, min(ch, _ev((float(cell["y"]) + float(cell["h"])) * ch)))
     return x1, y1, max(2, x2 - x1), max(2, y2 - y1)
 
 
@@ -345,35 +515,144 @@ def sources_used(tpl: dict) -> list:
 
 
 def layout_split_y(tpl: dict) -> int:
-    """卡片「吸附分割线」使用的 Y：优先取贯穿全宽的第一条横向分界线；没有分界线（画中画）时用模板 split 或画面中间。"""
+    """卡片「吸附分割线」使用的 Y：斜线分屏取斜线中点 Y；横竖分屏优先取贯穿全宽的第一条横向分界线；画中画用模板 split 或画面中间。"""
+    cw, ch = get_canvas_size(tpl)
     cells = [c for c in tpl_cells(tpl) if not c.get("pip")]
-    rects = [cell_rect_px(c) for c in cells]
-    ys = sorted({y + h for _, y, _, h in rects if 0 < y + h < CANVAS_H})
+    diag = tpl_diag_ys(cells)
+    if diag is not None:
+        return int(round((diag[0] + diag[1]) * 0.5 * ch))
+    rects = [cell_rect_px(c, tpl) for c in cells]
+    ys = sorted({y + h for _, y, _, h in rects if 0 < y + h < ch})
     for y in ys:
-        span = sum(w for _, cy, w, ch in rects if abs((cy + ch) - y) <= 2)
-        if span >= CANVAS_W - 4:
+        span = sum(w for _, cy, w, rh in rects if abs((cy + rh) - y) <= 2)
+        if span >= cw - 4:
             return y
     if ys:
         return ys[0]
-    return int(round(CANVAS_H * float(tpl.get("split") or 0.5)))
+    return int(round(ch * float(tpl.get("split") or 0.5)))
 
 
 def box_layout(tpl: dict) -> dict:
     return {"split_y": layout_split_y(tpl), "cells": tpl_cells(tpl)}
 
 
-def place_in_cell(src_w: int, src_h: int, cw: int, ch: int, cell: dict, adj: dict = None) -> tuple:
+# ── 画面整体：背景色 / 拼接分隔线 ──────────────────────────────────────────────
+
+def tpl_bg_color(tpl: dict) -> str:
+    """模板背景色（格子没覆盖到的区域），默认黑色。"""
+    c = str((tpl or {}).get("bg_color") or "#000000").strip()
+    return c if c.startswith("#") and len(c) in (4, 7) else "#000000"
+
+
+def tpl_divider(tpl: dict) -> tuple:
+    """(宽度px, 颜色)；宽度为 0 表示不画分隔线。"""
+    d = (tpl or {}).get("divider") or {}
+    try:
+        w = max(0, int(d.get("width", 0) or 0))
+    except Exception:
+        w = 0
+    c = str(d.get("color") or "#FFFFFF")
+    return w, (c if c.startswith("#") else "#FFFFFF")
+
+
+def divider_lines(tpl: dict) -> list:
+    """
+    返回斜线分割模板的分隔线段列表 [(x1, y1, x2, y2), ...]，像素坐标。
+    宽度为 0 或非斜线模板时返回 []。
+    """
+    wd, _ = tpl_divider(tpl)
+    if wd <= 0:
+        return []
+    cw, ch = get_canvas_size(tpl)
+    cells = [c for c in tpl_cells(tpl) if not c.get("pip")]
+    diag = tpl_diag_ys(cells)
+    if diag is not None:
+        return [(0.0, diag[0] * ch, float(cw), diag[1] * ch)]
+    return []
+
+
+def divider_rects(tpl: dict) -> list:
+    """
+    只在「矩形格子与矩形格子相接」的地方生成分隔条（画布四周、格子与背景相接处不画）。
+    返回 [(x, y, w, h), ...]，像素坐标，分隔条以接缝为中心。画中画小窗和斜线格子不参与矩形分隔。
+    """
+    wd, _ = tpl_divider(tpl)
+    if wd <= 0:
+        return []
+    cw, ch = get_canvas_size(tpl)
+    cells = [c for c in tpl_cells(tpl) if not c.get("pip") and not c.get("poly")]
+    rects = [cell_rect_px(c, tpl) for c in cells]
+    half = wd / 2.0
+    raw = []
+    for i, (ax, ay, aw, ah) in enumerate(rects):
+        for j, (bx, by, bw, bh) in enumerate(rects):
+            if i == j:
+                continue
+            if abs(ax + aw - bx) <= 3:                      # A 的右边贴着 B 的左边 → 竖线
+                y0, y1 = max(ay, by), min(ay + ah, by + bh)
+                if y1 - y0 > 2:
+                    x = (ax + aw + bx) / 2.0
+                    raw.append((x - half, y0, wd, y1 - y0))
+            if abs(ay + ah - by) <= 3:                      # A 的下边贴着 B 的上边 → 横线
+                x0, x1 = max(ax, bx), min(ax + aw, bx + bw)
+                if x1 - x0 > 2:
+                    y = (ay + ah + by) / 2.0
+                    raw.append((x0, y - half, x1 - x0, wd))
+    out, seen = [], set()
+    for x, y, w, h in raw:
+        x1, y1 = max(0, int(round(x))), max(0, int(round(y)))
+        x2, y2 = min(cw, int(round(x + w))), min(ch, int(round(y + h)))
+        if x2 - x1 < 1 or y2 - y1 < 1:
+            continue
+        key = (x1, y1, x2 - x1, y2 - y1)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def _ff_color(hexc: str) -> str:
+    h = (hexc or "#000000").lstrip("#")
+    if len(h) == 3:
+        h = "".join(ch * 2 for ch in h)
+    return "0x" + (h.upper() if len(h) == 6 else "000000")
+
+
+def place_in_cell(src_w: int, src_h: int, cw: int, ch: int, cell: dict, adj: dict = None, tpl: dict = None) -> tuple:
     """视频在格子内的缩放尺寸与位置（相对格子左上角）。返回 (sw, sh, x, y)"""
     adj = adj or {}
+    canv_w, canv_h = get_canvas_size(tpl)
     if src_w <= 0 or src_h <= 0:
-        src_w, src_h = CANVAS_W, CANVAS_H
+        src_w, src_h = canv_w, canv_h
+    ref = cell.get("ref_size")
+    if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
+        ref_w, ref_h = float(ref[0]), float(ref[1])
+    else:
+        ref_w, ref_h = float(REF_W), float(REF_H)
+    is_adapted = (abs(ref_w - canv_w) > 1 or abs(ref_h - canv_h) > 1)
+
     fill = cell.get("fill", "cover")
     sx, sy = cw / src_w, ch / src_h
     s = {"width": sx, "height": sy, "contain": min(sx, sy)}.get(fill, max(sx, sy))
+    # 当切换画布尺寸（如从 9:16 切换到 16:9 / 4:3 / 1:1 / 3:4）时，
+    # 旧版模板中的等宽/等高若不足以铺满新比例下的格子，自动升级为 cover 避免留黑边
+    if is_adapted and fill in ("width", "height") and s < max(sx, sy):
+        s = max(sx, sy)
     s *= float(adj.get("scale", 100)) / 100.0
     sw, sh = _even(src_w * s), _even(src_h * s)
-    x = (cw - sw) / 2 + int(cell.get("ox", 0)) + int(adj.get("dx", 0))
-    y = (ch - sh) / 2 + int(cell.get("oy", 0)) + int(adj.get("dy", 0))
+
+    ox_raw = float(cell.get("ox", 0)) * (canv_w / ref_w)
+    oy_raw = float(cell.get("oy", 0)) * (canv_h / ref_h)
+    bx = (cw - sw) / 2.0 + ox_raw
+    by = (ch - sh) / 2.0 + oy_raw
+    # 跨尺寸自动适配时，限制模板预设偏移不超出视频边缘，防止因旧版大偏移（如 oy=312）在新尺寸露出黑边
+    if is_adapted and fill != "contain":
+        if sw >= cw:
+            bx = max(float(cw - sw), min(0.0, bx))
+        if sh >= ch:
+            by = max(float(ch - sh), min(0.0, by))
+    x = bx + int(adj.get("dx", 0))
+    y = by + int(adj.get("dy", 0))
     return sw, sh, int(round(x)), int(round(y))
 
 
@@ -485,6 +764,84 @@ def _encoder_args(enc_key: str, q: int) -> list:
     return ["-c:v", "libx264", "-preset", "medium", "-crf", str(q)]
 
 
+def _ensure_cell_mask_png(cell: dict, x: int, y: int, w: int, h: int, tpl: dict = None) -> str:
+    """为带 poly 的斜切格子生成 w x h 灰度遮罩 PNG（带抗锯齿与 1.5px 接缝防漏底扩边）。"""
+    pts = cell_poly_px(cell, tpl)
+    if not pts:
+        return ""
+    import hashlib
+    key_str = f"{w}x{h}:{x},{y}:" + ";".join(f"{px:.2f},{py:.2f}" for px, py in pts)
+    digest = hashlib.md5(key_str.encode("utf-8")).hexdigest()[:12]
+    mask_dir = os.path.join(get_cache_dir(), "_masks")
+    os.makedirs(mask_dir, exist_ok=True)
+    out_p = os.path.join(mask_dir, f"cell_mask_{w}x{h}_{digest}.png")
+    if os.path.isfile(out_p) and os.path.getsize(out_p) > 0:
+        return out_p
+    from PyQt6.QtCore import Qt, QPointF
+    from PyQt6.QtGui import QImage, QPainter, QColor, QPolygonF, QPen
+    img = QImage(w, h, QImage.Format.Format_Grayscale8)
+    img.fill(0)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(255, 255, 255), 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(QColor(255, 255, 255))
+    poly = QPolygonF([QPointF(px - x, py - y) for px, py in pts])
+    p.drawPolygon(poly)
+    p.end()
+    tmp_p = f"{out_p}.{os.getpid()}.tmp.png"
+    img.save(tmp_p, "PNG")
+    try:
+        os.replace(tmp_p, out_p)
+    except Exception:
+        if os.path.exists(tmp_p):
+            try:
+                os.remove(tmp_p)
+            except Exception:
+                pass
+    return out_p
+
+
+def _ensure_diag_divider_png(tpl: dict) -> str:
+    """为斜线分割模板生成画布尺寸的透明分隔线图层 PNG。"""
+    lines = divider_lines(tpl)
+    wd, col_hex = tpl_divider(tpl)
+    if not lines or wd <= 0:
+        return ""
+    cw, ch = get_canvas_size(tpl)
+    import hashlib
+    key_str = f"{cw}x{ch}:{wd}:{col_hex}:" + ";".join(
+        f"{x1:.2f},{y1:.2f},{x2:.2f},{y2:.2f}" for x1, y1, x2, y2 in lines
+    )
+    digest = hashlib.md5(key_str.encode("utf-8")).hexdigest()[:12]
+    mask_dir = os.path.join(get_cache_dir(), "_masks")
+    os.makedirs(mask_dir, exist_ok=True)
+    out_p = os.path.join(mask_dir, f"diag_div_{digest}.png")
+    if os.path.isfile(out_p) and os.path.getsize(out_p) > 0:
+        return out_p
+    from PyQt6.QtCore import Qt, QPointF
+    from PyQt6.QtGui import QImage, QPainter, QColor, QPen
+    img = QImage(cw, ch, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(col_hex), float(wd), Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap, Qt.PenJoinStyle.MiterJoin)
+    p.setPen(pen)
+    for x1, y1, x2, y2 in lines:
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+    p.end()
+    tmp_p = f"{out_p}.{os.getpid()}.tmp.png"
+    img.save(tmp_p, "PNG")
+    try:
+        os.replace(tmp_p, out_p)
+    except Exception:
+        if os.path.exists(tmp_p):
+            try:
+                os.remove(tmp_p)
+            except Exception:
+                pass
+    return out_p
+
+
 def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
                      title_png: str = "", title_end: float = 0.0,
                      phone_png: str = "", phone_start: float = 0.0,
@@ -498,6 +855,7 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
     adj = task.get("adj", {}) or {}
     p_speed = max(0.1, float(person_speed if person_speed is not None else task.get("person_speed", 1.0)))
     p_mute = bool(mute_person if mute_person is not None else task.get("mute_person", True))
+    canv_w, canv_h = get_canvas_size(tpl)
     cells = [(i, cl) for i, cl in ordered_cells(tpl) if task_source(task, cl.get("src"))]
 
     cmd = [get_ffmpeg(), "-y", "-hide_banner", "-loglevel", "error"]
@@ -536,7 +894,24 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
         wm_idx = idx
         idx += 1
 
-    fc = [f"color=c=black:s={CANVAS_W}x{CANVAS_H}:r=30:d={D:.3f}[base]"]
+    # 多边形斜切遮罩输入 & 斜线分隔条输入
+    cell_mask_idx = {}
+    for k, (ci, cl) in enumerate(cells):
+        if cl.get("poly"):
+            x, y, w, h = cell_rect_px(cl, tpl)
+            mp = _ensure_cell_mask_png(cl, x, y, w, h, tpl)
+            if mp and os.path.isfile(mp):
+                cmd += ["-loop", "1", "-t", f"{D:.3f}", "-i", mp]
+                cell_mask_idx[k] = idx
+                idx += 1
+    diag_div_idx = None
+    diag_div_png = _ensure_diag_divider_png(tpl)
+    if diag_div_png and os.path.isfile(diag_div_png):
+        cmd += ["-loop", "1", "-t", f"{D:.3f}", "-i", diag_div_png]
+        diag_div_idx = idx
+        idx += 1
+
+    fc = [f"color=c={_ff_color(tpl_bg_color(tpl))}:s={canv_w}x{canv_h}:r=30:d={D:.3f}[base]"]
     # 同一路视频用在多个格子里时需要 split；人物视频仅标记对齐时在此统一完成变速与循环裁切
     labels = {}
     for sname, si in src_idx.items():
@@ -557,21 +932,48 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
             fc.append(f"[{base_v}]split={n}" + "".join(f"[{o}]" for o in outs))
             labels[sname] = outs
     last = "base"
+    div_rects = divider_rects(tpl)
+    div_color = _ff_color(tpl_divider(tpl)[1])
+    div_done = (not div_rects) and (diag_div_idx is None)
+
+    def _add_dividers(src_label):
+        cur = src_label
+        if div_rects:
+            chain = ",".join(f"drawbox=x={x}:y={y}:w={w}:h={h}:color={div_color}@1:t=fill"
+                             for x, y, w, h in div_rects)
+            fc.append(f"[{cur}]{chain}[dv_r]")
+            cur = "dv_r"
+        if diag_div_idx is not None:
+            fc.append(f"[{cur}][{diag_div_idx}:v]overlay=0:0[dv_d]")
+            cur = "dv_d"
+        return cur
+
     for k, (ci, cl) in enumerate(cells):
-        x, y, w, h = cell_rect_px(cl)
+        if not div_done and cl.get("pip"):          # 分隔线画在普通格子之上、画中画小窗之下
+            last = _add_dividers(last)
+            div_done = True
+        x, y, w, h = cell_rect_px(cl, tpl)
         info = src_info[cl["src"]]
-        sw, sh, ox, oy = place_in_cell(info[1], info[2], w, h, cl, adj.get(cl["src"]))
+        sw, sh, ox, oy = place_in_cell(info[1], info[2], w, h, cl, adj.get(cl["src"]), tpl)
         lab = labels[cl["src"]].pop(0)
         b = int(cl.get("border", 0) or 0)
-        if b > 0:
+        if b > 0 and k not in cell_mask_idx:
             fc.append(f"color=c=white:s={w + 2 * b}x{h + 2 * b}:r=30:d={D:.3f}[bd{k}]")
             fc.append(f"[{last}][bd{k}]overlay={x - b}:{y - b}[lb{k}]")
             last = f"lb{k}"
         fc.append(f"color=c=black:s={w}x{h}:r=30:d={D:.3f}[box{k}]")
         fc.append(f"[{lab}]scale={sw}:{sh},setsar=1[sv{k}]")
-        fc.append(f"[box{k}][sv{k}]overlay=x={ox}:y={oy}:eof_action=repeat[cb{k}]")
+        if k in cell_mask_idx:
+            m_idx = cell_mask_idx[k]
+            fc.append(f"[box{k}][sv{k}]overlay=x={ox}:y={oy}:eof_action=repeat,format=yuva420p[cb_raw{k}]")
+            fc.append(f"[{m_idx}:v]format=gray[msk{k}]")
+            fc.append(f"[cb_raw{k}][msk{k}]alphamerge[cb{k}]")
+        else:
+            fc.append(f"[box{k}][sv{k}]overlay=x={ox}:y={oy}:eof_action=repeat[cb{k}]")
         fc.append(f"[{last}][cb{k}]overlay={x}:{y}[l{k}]")
         last = f"l{k}"
+    if not div_done:
+        last = _add_dividers(last)
     if title_idx is not None:
         fc.append(f"[{last}][{title_idx}:v]overlay=0:0:enable='between(t,0,{title_end:.3f})'[s3]")
         last = "s3"
