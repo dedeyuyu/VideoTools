@@ -9,7 +9,7 @@ else:
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root_dir)
 
-APP_VERSION = "1.5.17"
+APP_VERSION = "1.5.18"
 WINDOW_TITLES = (f"视频集成工具 v{APP_VERSION}", f"VideoTools v{APP_VERSION}")
 
 
@@ -37,6 +37,7 @@ from UI.ui_duet_video import DuetVideoUI
 from UI.ui_quick_merge import QuickMergeUI
 from UI.ui_landscape_to_portrait import LandscapeToPortraitUI
 from UI.ui_auto_speed import AutoSpeedUI
+from UI.ui_video_transcoder import VideoTranscoderUI
 from UI.ui_ffmpeg_downloader_mgr import (FFmpegDownloaderDialog, get_ffmpeg_status,
                                           get_opencv_status, get_ytdlp_status,
                                           get_mediapipe_status, get_face_detection_status)
@@ -103,6 +104,7 @@ class ToolboxApp(QMainWindow):
         
         self.item_duet = QTreeWidgetItem(["✨ 合拍视频批量合成"])
         self.item_quick_merge = QTreeWidgetItem(["⚡ 快速合并"])
+        self.item_transcode = QTreeWidgetItem(["🔄 视频批量转码"])
         self.item_video = QTreeWidgetItem(["🚀 视频合并与转场"])
         self.item_img_merge = QTreeWidgetItem(["✨ 图片合并成视频"])
         self.item_copyright = QTreeWidgetItem(["🎨 处理版权图片"])
@@ -112,7 +114,7 @@ class ToolboxApp(QMainWindow):
         self.item_screenshot = QTreeWidgetItem(["📸 链接截图"])
         self.item_speed = QTreeWidgetItem(["⏩ 自动调速"])
         
-        cat_video.addChildren([self.item_duet, self.item_quick_merge, self.item_video, self.item_img_merge, self.item_copyright, 
+        cat_video.addChildren([self.item_duet, self.item_quick_merge, self.item_transcode, self.item_video, self.item_img_merge, self.item_copyright, 
                                self.item_l2p, self.item_image, self.item_multi, self.item_screenshot, self.item_speed])
         self.nav_tree.addTopLevelItem(cat_video)
 
@@ -175,6 +177,7 @@ class ToolboxApp(QMainWindow):
         self.gdrive_tool     = GDriveDownloaderUI()
         self.speed_tool      = AutoSpeedUI()
         self.quick_merge_tool = QuickMergeUI()
+        self.transcode_tool  = VideoTranscoderUI()
 
         self.stacked_widget.addWidget(self.duet_tool)           # 0
         self.stacked_widget.addWidget(self.video_tool)          # 1
@@ -188,6 +191,7 @@ class ToolboxApp(QMainWindow):
         self.stacked_widget.addWidget(self.gdrive_tool)         # 9
         self.stacked_widget.addWidget(self.speed_tool)          # 10
         self.stacked_widget.addWidget(self.quick_merge_tool)    # 11
+        self.stacked_widget.addWidget(self.transcode_tool)      # 12
 
         self.content_layout.addWidget(self.stacked_widget)
         self.main_layout.addWidget(self.content_widget)
@@ -205,6 +209,7 @@ class ToolboxApp(QMainWindow):
             id(self.item_gdrive): 9,
             id(self.item_speed): 10,
             id(self.item_quick_merge): 11,
+            id(self.item_transcode): 12,
         }
 
         self.nav_tree.itemClicked.connect(self.on_tree_item_clicked)
@@ -632,6 +637,8 @@ class ToolboxApp(QMainWindow):
             self.duet_tool.save_settings()
         if hasattr(self, 'quick_merge_tool'):
             self.quick_merge_tool.save_settings()
+        if hasattr(self, 'transcode_tool'):
+            self.transcode_tool.save_settings()
         event.accept()
 
 if __name__ == "__main__":

@@ -201,6 +201,47 @@ MANUAL = {
     "⏳ 合成中...": "⏳ Merging...",
     "✅ 完成": "✅ Done",
     "❌ 失败": "❌ Failed",
+    "🔄 视频批量转码": "🔄 Batch Video Transcode",
+    "将视频转换为标准兼容格式（H.264 + AAC + 恒定帧率），解决在其他软件中无法导入或无法导出的问题，输出按原文件名命名":
+        "Convert videos to standard compatible format (H.264 + AAC + CFR) to fix import/export errors in other software, keeping original filenames",
+    "📂 待转码视频列表（直接拖拽视频或文件夹到下方列表）  [{0} 个]":
+        "📂 Videos to Transcode (Drag & drop videos or folders below)  [{0}]",
+    "⚙️ 转码参数设置（默认已设为最佳兼容模式，可直接点击开始转码）":
+        "⚙️ Transcode Settings (Pre-configured for maximum compatibility)",
+    "转码模式:": "Transcode Mode:",
+    "🛠️ 标准兼容修复（推荐 · H.264 + AAC + 恒定帧率，解决无法导入/导出）":
+        "🛠️ Standard Compatibility Fix (Recommended · H.264 + AAC + CFR)",
+    "💎 高清无损画质（H.264 高码率 CRF 15，适合二次剪辑）":
+        "💎 High Quality Lossless (H.264 High Bitrate CRF 15)",
+    "📦 轻量压缩（H.264 CRF 24，减小文件体积同时保持兼容）":
+        "📦 Compact Size (H.264 CRF 24, smaller file size & compatible)",
+    "⚡ 极速重封装（已兼容视频直接秒级修复容器，不兼容视频自动转码）":
+        "⚡ Fast Remux (Instant container repair for H.264, auto-transcode if incompatible)",
+    "输出格式:": "Output Format:",
+    "MP4 (.mp4 · 全平台通用推荐)": "MP4 (.mp4 · Universal Recommended)",
+    "编码方式:": "Encoder:",
+    "🖥️ CPU 标准编码 (libx264 · 兼容性最佳)": "🖥️ Standard CPU (libx264 · Best Compatibility)",
+    "🚀 GPU 硬件加速（自动检测显卡，失败回退 CPU）": "🚀 GPU Hardware Accel (Auto-detect, fallback to CPU)",
+    "输出分辨率:": "Resolution:",
+    "保持原分辨率（自动修正奇数宽高）": "Keep Original (Auto-fix odd dimensions)",
+    "1080P (长边最多 1920)": "1080P (Max long edge 1920)",
+    "720P (长边最多 1280)": "720P (Max long edge 1280)",
+    "2K (长边最多 2560)": "2K (Max long edge 2560)",
+    "4K (长边最多 3840)": "4K (Max long edge 3840)",
+    "输出帧率:": "Frame Rate:",
+    "保持原帧率（转为恒定帧率 CFR）": "Keep Original FPS (Convert to CFR)",
+    "30 fps（常用标准帧率）": "30 fps (Standard)",
+    "60 fps（高帧率流畅）": "60 fps (Smooth)",
+    "音频处理:": "Audio:",
+    "转为标准 AAC 音频 (44.1kHz 双声道 · 推荐)": "Convert to Standard AAC (44.1kHz Stereo · Recommended)",
+    "保留原音频流（若已是 AAC）": "Keep Original Audio (if AAC)",
+    "去除声音（输出静音视频）": "Mute Audio (Silent Video)",
+    "原视频无音轨时自动补充静音轨（防止部分软件因缺音轨无法导出）":
+        "Auto-add silent audio track if source has no audio (prevents export errors in some editors)",
+    "📤 导出目录（导出文件名将自动保持原视频文件名）":
+        "📤 Output Folder (Output files automatically keep original filenames)",
+    "📁 打开目录": "📁 Open Folder",
+    "🚀 开始批量转码": "🚀 Start Batch Transcode",
 }
 
 # ── 翻译表 ────────────────────────────────────────────────────────────

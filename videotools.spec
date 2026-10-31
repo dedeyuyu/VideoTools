@@ -63,6 +63,8 @@ a = Analysis(
         'UI.crash_guard',
         'UI.ui_auto_speed',
         'UI.ui_quick_merge',
+        'UI.ui_video_transcoder',
+        'image_worker.transcode_worker',
         'image_worker.quick_merge_worker',
         'image_worker.auto_speed_worker',
         'image_worker.screenshot_worker',

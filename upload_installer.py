@@ -7,7 +7,7 @@ token = os.environ.get("GITHUB_TOKEN") or open(os.path.join(os.path.dirname(os.p
 repo_owner = "dedeyuyu"
 repo_name = "VideoTools"
 
-installer_path = "output_installer/VideoTools_v1.5.17_Setup.exe"
+installer_path = "output_installer/VideoTools_v1.5.18_Setup.exe"
 
 headers = {
     "Authorization": f"token {token}",
@@ -16,9 +16,9 @@ headers = {
 
 # Create release
 release_payload = {
-    "tag_name": "v1.5.17",
-    "name": "VideoTools Release v1.5.17",
-    "body": "### v1.5.17 更新内容\n- **多画幅比例支持（9:16 / 3:4 / 1:1 / 4:3 / 16:9）**：四个步骤页顶栏同步切换视频尺寸，720P / 1080P / 2K / 4K 导出分辨率随比例自动联动，所有分屏模板、斜线模板、卡片与水印自动自适应画幅并防露黑边\n- **斜线分屏排版**：新增 4 套斜线分屏内置模板（左低右高 / 左高右低 × 主上人下 / 人上主下），支持多边形斜向裁剪、画布直接拖拽斜线两端控制点与精确调整左/右端点高度\n- **笔刷裂纹文字与底条特效**：新增笔刷裂纹、折纸褶皱、复古斑驳纹理与 3 款笔刷双色内置预设\n- **预设管理与接缝分隔线升级**：新增板块接缝带色分隔线（可调颜色与宽度）、预设名称一键导出到 Excel、非模态预设管理窗口支持边切换任务边搜索应用，排版参数区支持滚动浏览",
+    "tag_name": "v1.5.18",
+    "name": "VideoTools Release v1.5.18",
+    "body": "### v1.5.18 更新内容\n- **新增「🔄 视频批量转码」工具页**：支持批量拖入多个视频或文件夹，一键将视频转换为全软件通用的标准兼容格式（H.264 `yuv420p` + AAC + 恒定帧率 CFR + FastStart），解决在其他剪辑软件或平台中无法导入/无法导出的问题\n- **多种转码模式与硬件加速**：内置标准兼容修复、高清无损画质（CRF 15）、轻量压缩（CRF 24）、极速重封装四种模式，支持 GPU 硬件加速自动检测与 CPU 自动回退，支持无音轨视频自动补充静音轨\n- **原名保持输出**：自由选择导出目录，转码后文件自动保持原视频文件名命名",
     "draft": False,
     "prerelease": False
 }
@@ -47,7 +47,7 @@ headers_upload = {
 
 with open(installer_path, "rb") as f:
     upload_resp = requests.post(
-        f"{upload_url}?name=VideoTools_v1.5.17_Setup.exe",
+        f"{upload_url}?name=VideoTools_v1.5.18_Setup.exe",
         headers=headers_upload,
         data=f
     )
