@@ -8,13 +8,16 @@ ui_gdrive_downloader.py
   - 输出目录选择，使用 QSettings 记住上次路径
   - 后台 yt-dlp 下载线程，实时进度日志
   - 支持任意文件类型：视频、图片、文档等
+  - 支持谷歌云端文件夹链接：自动解析并下载文件夹中的所有视频，按「自定义命名+01、02…」编号区分
 """
 
 import os
 import sys
 import re
+import json
 import subprocess
 import threading
+import requests
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -31,12 +34,12 @@ from PyQt6.QtGui import QFont, QColor, QKeySequence, QShortcut
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GDriveWorker(QThread):
-    """逐行读取表格中的（链接, 命名），调用 yt-dlp 下载。"""
+    """逐行读取表格中的（链接, 命名），调用 yt-dlp 下载（支持单文件链接和谷歌云端文件夹链接）。"""
 
-    log_line        = pyqtSignal(str)           # 实时日志行
-    item_done       = pyqtSignal(int, bool, str)  # (row_idx, ok, msg)
-    overall_progress= pyqtSignal(int, str)       # (pct, text)
-    all_done        = pyqtSignal(bool, str)       # (all_ok, summary)
+    log_line         = pyqtSignal(str)             # 实时日志行
+    item_done        = pyqtSignal(int, bool, str)  # (row_idx, ok, msg)
+    overall_progress = pyqtSignal(int, str)        # (pct, text)
+    all_done         = pyqtSignal(bool, str)       # (all_ok, summary)
 
     def __init__(self, tasks: list[tuple[str, str]], output_dir: str, ffmpeg_dir: str):
         """
@@ -94,6 +97,66 @@ class GDriveWorker(QThread):
         except Exception:
             pass
 
+    def _download_single_url(self, url: str, name: str, progress_cb=None) -> tuple[bool, str, bool]:
+        """
+        下载单个 Google Drive 文件链接。
+        返回: (success, reason_msg, fatal_missing_ytdlp)
+        """
+        cmd = self._build_args(url, name)
+        self.log_line.emit(f"[CMD] {' '.join(cmd)}")
+
+        try:
+            self._current_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+
+            stderr_lines: list[str] = []
+            t = threading.Thread(
+                target=self._read_stderr,
+                args=(self._current_proc, stderr_lines),
+                daemon=True,
+            )
+            t.start()
+
+            for line in self._current_proc.stdout:
+                if self._stop_flag:
+                    self._current_proc.terminate()
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                self.log_line.emit(f"[OUT] {line}")
+
+                m = re.search(r"\[download\]\s+([\d.]+)%", line)
+                if m and progress_cb:
+                    pct = min(int(float(m.group(1))), 100)
+                    progress_cb(pct)
+
+            t.join(timeout=5)
+            self._current_proc.wait()
+            retcode = self._current_proc.returncode
+
+            if self._stop_flag:
+                return False, "已停止", False
+            elif retcode == 0:
+                return True, "✅ 下载完成", False
+            else:
+                err_text = " ".join(stderr_lines)
+                reason = _classify_error(err_text, retcode)
+                self.log_line.emit(f"[FAIL] code={retcode} | {reason}")
+                return False, reason, False
+
+        except FileNotFoundError:
+            self.log_line.emit("[FAIL] 找不到 yt-dlp，请先安装（pip install yt-dlp）")
+            return False, "找不到 yt-dlp，请先安装", True
+        except Exception as e:
+            self.log_line.emit(f"[FAIL] 异常: {e}")
+            return False, f"异常: {e}", False
+
     def run(self):
         total     = len(self.tasks)
         succeeded = failed = 0
@@ -105,78 +168,150 @@ class GDriveWorker(QThread):
             display = name.strip() or url
             self.overall_progress.emit(
                 int(idx / total * 100),
-                f"正在下载第 {idx+1}/{total} 个：{display[:40]}"
+                f"正在处理第 {idx+1}/{total} 个：{display[:40]}"
             )
             self.log_line.emit(f"\n{'─'*60}")
             self.log_line.emit(f"[{idx+1}/{total}] 链接: {url}")
             self.log_line.emit(f"[{idx+1}/{total}] 命名: {name or '（使用原标题）'}")
 
-            cmd = self._build_args(url, name)
-            self.log_line.emit(f"[CMD] {' '.join(cmd)}")
-
-            try:
-                self._current_proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True, encoding="utf-8", errors="replace",
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            folder_info = _extract_folder_info(url)
+            if folder_info is not None:
+                folder_id, resource_key = folder_info
+                self.log_line.emit(f"[{idx+1}/{total}] 📂 检测到谷歌云端文件夹链接 (ID: {folder_id})，正在获取视频列表...")
+                self.overall_progress.emit(
+                    int(idx / total * 100),
+                    f"正在解析第 {idx+1}/{total} 个文件夹内容..."
                 )
 
-                stderr_lines: list[str] = []
-                t = threading.Thread(
-                    target=self._read_stderr,
-                    args=(self._current_proc, stderr_lines),
-                    daemon=True,
-                )
-                t.start()
-
-                last_pct = 0
-                for line in self._current_proc.stdout:
-                    if self._stop_flag:
-                        self._current_proc.terminate()
-                        break
-                    line = line.strip()
-                    if not line:
-                        continue
-                    self.log_line.emit(f"[OUT] {line}")
-
-                    m = re.search(r"\[download\]\s+([\d.]+)%", line)
-                    if m:
-                        pct = min(int(float(m.group(1))), 100)
-                        last_pct = pct
-                        fine = (idx + pct / 100) / total * 100
-                        self.overall_progress.emit(
-                            int(fine), f"正在下载第 {idx+1}/{total} 个 ({pct}%)"
-                        )
-
-                t.join(timeout=5)
-                self._current_proc.wait()
-                retcode = self._current_proc.returncode
+                try:
+                    folder_title, videos = _fetch_gdrive_folder_videos(folder_id, resource_key)
+                except Exception as e:
+                    failed += 1
+                    err_msg = f"解析文件夹失败: {e}"
+                    self.item_done.emit(idx, False, f"❌ {err_msg}")
+                    self.log_line.emit(f"[FAIL] {err_msg}")
+                    continue
 
                 if self._stop_flag:
                     self.item_done.emit(idx, False, "已停止")
                     break
-                elif retcode == 0:
+
+                if not videos:
+                    failed += 1
+                    msg = "文件夹内未找到可下载的视频文件（请确认文件夹已公开分享且包含视频）"
+                    self.item_done.emit(idx, False, f"❌ {msg}")
+                    self.log_line.emit(f"[FAIL] {msg}")
+                    continue
+
+                vid_count = len(videos)
+                folder_label = folder_title or folder_id
+                self.log_line.emit(
+                    f"[{idx+1}/{total}] 📂 文件夹「{folder_label}」共找到 {vid_count} 个视频，开始逐个下载..."
+                )
+
+                # 基础命名：优先取用户自定义命名（去掉可能误填的视频扩展名）
+                user_base = _strip_video_ext(name.strip()) if name.strip() else ""
+                folder_ok = 0
+                folder_fail = 0
+                fatal_abort = False
+
+                for v_idx, v_item in enumerate(videos, start=1):
+                    if self._stop_flag:
+                        break
+
+                    seq = f"{v_idx:02d}"
+                    orig_title = v_item.get("title") or v_item["id"]
+                    if user_base:
+                        sub_name = f"{user_base}{seq}"
+                    else:
+                        orig_stem = _strip_video_ext(orig_title) or folder_title or "video"
+                        sub_name = f"{orig_stem}{seq}"
+
+                    file_url = f"https://drive.google.com/file/d/{v_item['id']}/view"
+                    if v_item.get("resourceKey"):
+                        file_url += f"?resourcekey={v_item['resourceKey']}"
+
+                    self.log_line.emit(
+                        f"\n  ▶ [{idx+1}/{total} · 视频 {v_idx}/{vid_count}] "
+                        f"原文件: {orig_title}  →  保存命名: {sub_name}"
+                    )
+
+                    def _on_sub_progress(pct: int, _i=idx, _v=v_idx, _n=vid_count):
+                        task_frac = ((_v - 1) + pct / 100.0) / _n
+                        fine = (_i + task_frac) / total * 100
+                        self.overall_progress.emit(
+                            int(fine),
+                            f"正在下载第 {_i+1}/{total} 项 [文件夹视频 {_v}/{_n}] ({pct}%)"
+                        )
+
+                    _on_sub_progress(0)
+                    ok, reason, fatal = self._download_single_url(
+                        file_url, sub_name, progress_cb=_on_sub_progress
+                    )
+                    if fatal:
+                        self.item_done.emit(idx, False, f"❌ {reason}")
+                        fatal_abort = True
+                        break
+                    if self._stop_flag:
+                        break
+
+                    if ok:
+                        folder_ok += 1
+                        self.log_line.emit(
+                            f"  [OK] 文件夹视频 {v_idx}/{vid_count} 下载完成 ({sub_name})"
+                        )
+                    else:
+                        folder_fail += 1
+                        self.log_line.emit(
+                            f"  [FAIL] 文件夹视频 {v_idx}/{vid_count} 下载失败: {reason}"
+                        )
+
+                if fatal_abort:
+                    failed += 1
+                    break
+                if self._stop_flag:
+                    self.item_done.emit(idx, False, "已停止")
+                    break
+
+                if folder_fail == 0:
+                    succeeded += 1
+                    self.item_done.emit(idx, True, f"✅ 文件夹下载完成 ({folder_ok} 个视频)")
+                    self.log_line.emit(f"[OK] 第 {idx+1} 项文件夹全部下载完成（共 {folder_ok} 个视频）")
+                else:
+                    failed += 1
+                    self.item_done.emit(
+                        idx, False, f"❌ 文件夹成功 {folder_ok}/{vid_count}，失败 {folder_fail} 个"
+                    )
+                    self.log_line.emit(
+                        f"[FAIL] 第 {idx+1} 项文件夹部分或全部失败（成功 {folder_ok}/{vid_count}，失败 {folder_fail} 个）"
+                    )
+
+            else:
+                # ── 单文件链接下载 ───────────────────────────────────────────
+                def _on_file_progress(pct: int, _i=idx):
+                    fine = (_i + pct / 100.0) / total * 100
+                    self.overall_progress.emit(
+                        int(fine), f"正在下载第 {_i+1}/{total} 个 ({pct}%)"
+                    )
+
+                ok, reason, fatal = self._download_single_url(
+                    url, name, progress_cb=_on_file_progress
+                )
+                if fatal:
+                    failed += 1
+                    self.item_done.emit(idx, False, f"❌ {reason}")
+                    break
+                if self._stop_flag:
+                    self.item_done.emit(idx, False, "已停止")
+                    break
+
+                if ok:
                     succeeded += 1
                     self.item_done.emit(idx, True, "✅ 下载完成")
                     self.log_line.emit(f"[OK] 第 {idx+1} 个下载完成")
                 else:
                     failed += 1
-                    err_text = " ".join(stderr_lines)
-                    reason = _classify_error(err_text, retcode)
                     self.item_done.emit(idx, False, f"❌ {reason}")
-                    self.log_line.emit(f"[FAIL] code={retcode} | {reason}")
-
-            except FileNotFoundError:
-                failed += 1
-                self.item_done.emit(idx, False, "❌ 找不到 yt-dlp，请先安装")
-                self.log_line.emit("[FAIL] 找不到 yt-dlp，请先安装（pip install yt-dlp）")
-                break
-            except Exception as e:
-                failed += 1
-                self.item_done.emit(idx, False, f"❌ 异常: {e}")
-                self.log_line.emit(f"[FAIL] 异常: {e}")
 
         if self._stop_flag:
             self.all_done.emit(False, f"已停止。完成 {succeeded} 个，失败 {failed} 个。")
@@ -191,6 +326,234 @@ class GDriveWorker(QThread):
 # ─────────────────────────────────────────────────────────────────────────────
 #  工具函数
 # ─────────────────────────────────────────────────────────────────────────────
+
+_VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".wmv", ".m4v",
+    ".ts", ".mpg", ".mpeg", ".3gp", ".mts", ".m2ts", ".vob", ".ogv",
+    ".rmvb", ".rm", ".asf", ".f4v",
+}
+
+_FOLDER_URL_RE = re.compile(
+    r"https?://(?:docs|drive)\.google\.com/"
+    r"(?:drive/(?:u/\d+/|mobile/)?folders/|folderview\?(?:[^#]*&)?id=)"
+    r"([a-zA-Z0-9_-]{15,})",
+    re.I,
+)
+
+_RESOURCE_KEY_RE = re.compile(r"[?&]resourcekey=([a-zA-Z0-9_-]+)", re.I)
+
+
+def _extract_folder_info(url: str) -> tuple[str, str] | None:
+    """
+    若 url 是 Google Drive 文件夹链接，返回 (folder_id, resource_key)；
+    否则返回 None。
+    """
+    m = _FOLDER_URL_RE.search(url)
+    if not m:
+        return None
+    folder_id = m.group(1)
+    rk_m = _RESOURCE_KEY_RE.search(url)
+    resource_key = rk_m.group(1) if rk_m else ""
+    return folder_id, resource_key
+
+
+def _strip_video_ext(name: str) -> str:
+    """若文件名末尾带有常见视频扩展名则去除，方便追加 01、02 序号。"""
+    base, ext = os.path.splitext(name)
+    if ext.lower() in _VIDEO_EXTENSIONS and base.strip():
+        return base.strip()
+    return name.strip()
+
+
+def _is_video_item(item: dict) -> bool:
+    """判断 Google Drive 文件夹条目是否为视频文件。"""
+    mime = (item.get("mimeType") or "").lower()
+    if mime == "application/vnd.google-apps.folder":
+        return False
+    if mime.startswith("video/"):
+        return True
+    ext = (item.get("fileExtension") or "").lower().lstrip(".")
+    if ext and f".{ext}" in _VIDEO_EXTENSIONS:
+        return True
+    title = (item.get("title") or "").lower()
+    for vext in _VIDEO_EXTENSIONS:
+        if title.endswith(vext):
+            return True
+    return False
+
+
+def _natural_sort_key(item: dict):
+    """按文件标题进行自然排序（如 1, 2, ..., 10），与 Google Drive 默认顺序一致。"""
+    title = item.get("title") or ""
+    return [int(s) if s.isdigit() else s.lower() for s in re.split(r"(\d+)", title)]
+
+
+def _fetch_gdrive_folder_videos(folder_id: str, resource_key: str = "") -> tuple[str, list[dict]]:
+    """
+    解析公开分享的 Google Drive 文件夹，返回 (folder_title, video_items)。
+    每个 video_item 包含: {"id": str, "title": str, "mimeType": str, "resourceKey": str}
+    按文件名自然排序。
+    """
+    session = requests.Session()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    }
+    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+    params = {}
+    if resource_key:
+        params["resourcekey"] = resource_key
+
+    resp = session.get(folder_url, params=params, headers=headers, timeout=25)
+    if resp.status_code == 404:
+        raise RuntimeError("文件夹不存在或链接已失效 (404)")
+    if resp.status_code in (401, 403):
+        raise RuntimeError("无权访问该文件夹（请确认文件夹已设为「知道链接的任何人可查看」）")
+    resp.raise_for_status()
+    html = resp.text
+
+    # 提取文件夹标题
+    folder_title = ""
+    title_m = re.search(r"<title>(.*?)</title>", html, re.S)
+    if title_m:
+        t = title_m.group(1).strip()
+        t = re.sub(r"\s*-\s*Google\s*(Drive|云端硬盘).*$", "", t, flags=re.I).strip()
+        folder_title = t
+
+    items: list[dict] = []
+
+    # ── 方式 1：从网页内置的 window['_DRIVE_ivd'] 提取 ──────────────────────
+    ivd_m = re.search(r"window\['_DRIVE_ivd'\]\s*=\s*'([^']+)'", html)
+    has_more_pages = False
+    if ivd_m:
+        try:
+            raw = re.sub(
+                r"\\x([0-9a-fA-F]{2})",
+                lambda m: chr(int(m.group(1), 16)),
+                ivd_m.group(1),
+            )
+            data = json.loads(raw)
+            if data and isinstance(data[0], list):
+                for entry in data[0]:
+                    if isinstance(entry, list) and len(entry) >= 4 and entry[0]:
+                        items.append({
+                            "id": str(entry[0]),
+                            "title": str(entry[2] or ""),
+                            "mimeType": str(entry[3] or ""),
+                            "fileExtension": "",
+                            "resourceKey": "",
+                        })
+            if len(data) > 1 and data[1]:
+                has_more_pages = True
+        except Exception:
+            items = []
+
+    # ── 方式 2：调用 Google Drive v2beta API（支持翻页及完整字段）───────────
+    if not items or has_more_pages:
+        keys = list(dict.fromkeys(re.findall(r'"(AIza[0-9A-Za-z_-]{35})"', html)))
+        api_headers = {
+            **headers,
+            "Origin": "https://drive.google.com",
+            "Referer": "https://drive.google.com/",
+        }
+        if resource_key:
+            api_headers["X-Goog-Drive-Resource-Keys"] = f"{folder_id}/{resource_key}"
+
+        for key in keys:
+            api_items: list[dict] = []
+            page_token = ""
+            api_ok = False
+            while True:
+                api_params = {
+                    "openDrive": "true",
+                    "reason": "102",
+                    "syncType": "0",
+                    "errorRecovery": "false",
+                    "q": f"trashed = false and '{folder_id}' in parents",
+                    "fields": (
+                        "kind,nextPageToken,"
+                        "items(id,title,mimeType,fileExtension,resourceKey,"
+                        "shortcutDetails(targetId,targetMimeType))"
+                    ),
+                    "appDataFilter": "NO_APP_DATA",
+                    "spaces": "drive",
+                    "maxResults": "500",
+                    "supportsTeamDrives": "true",
+                    "includeItemsFromAllDrives": "true",
+                    "corpora": "default",
+                    "orderBy": "folder,title_natural asc",
+                    "retryCount": "0",
+                    "key": key,
+                }
+                if page_token:
+                    api_params["pageToken"] = page_token
+                try:
+                    r_api = session.get(
+                        "https://clients6.google.com/drive/v2beta/files",
+                        params=api_params,
+                        headers=api_headers,
+                        timeout=20,
+                    )
+                except Exception:
+                    break
+                if r_api.status_code != 200:
+                    break
+                api_ok = True
+                j = r_api.json()
+                for it in j.get("items", []):
+                    mime = it.get("mimeType") or ""
+                    file_id = it.get("id") or ""
+                    if mime == "application/vnd.google-apps.shortcut":
+                        sd = it.get("shortcutDetails") or {}
+                        file_id = sd.get("targetId") or file_id
+                        mime = sd.get("targetMimeType") or mime
+                    if file_id:
+                        api_items.append({
+                            "id": file_id,
+                            "title": it.get("title") or "",
+                            "mimeType": mime,
+                            "fileExtension": it.get("fileExtension") or "",
+                            "resourceKey": it.get("resourceKey") or "",
+                        })
+                page_token = j.get("nextPageToken")
+                if not page_token:
+                    break
+            if api_ok and api_items:
+                items = api_items
+                break
+
+    # ── 方式 3：embeddedfolderview 兜底解析 ─────────────────────────────────
+    if not items:
+        emb_url = f"https://drive.google.com/embeddedfolderview?id={folder_id}#list"
+        r_emb = session.get(emb_url, params=params, headers=headers, timeout=20)
+        if r_emb.status_code == 200:
+            for m in re.finditer(
+                r'<div class="flip-entry"[^>]*id="entry-([a-zA-Z0-9_-]+)"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+                r_emb.text,
+                re.S,
+            ):
+                entry_id = m.group(1)
+                block = m.group(2)
+                if "/drive/folders/" in block:
+                    continue
+                t_m = re.search(r'<div class="flip-entry-title">(.*?)</div>', block, re.S)
+                entry_title = t_m.group(1).strip() if t_m else entry_id
+                items.append({
+                    "id": entry_id,
+                    "title": entry_title,
+                    "mimeType": "video/*" if any(entry_title.lower().endswith(ext) for ext in _VIDEO_EXTENSIONS) else "",
+                    "fileExtension": "",
+                    "resourceKey": "",
+                })
+
+    videos = [it for it in items if _is_video_item(it)]
+    videos.sort(key=_natural_sort_key)
+    return folder_title, videos
+
 
 def _sanitize_filename(name: str) -> str:
     """去掉 Windows 文件名非法字符。"""
@@ -292,7 +655,7 @@ class GDriveDownloaderUI(QWidget):
         hint_text = QLabel(
             "在下方表格中粘贴或输入下载任务。"
             "第一列为 Google Drive 链接，第二列为自定义命名（不含扩展名）。\n"
-            "支持 <b>任意文件类型</b>：视频、图片、PDF、文档等，只要链接可以打开就能下载。\n"
+            "支持 <b>单文件链接</b>（视频、图片、PDF、文档等）以及 <b>谷歌云端文件夹链接</b>（自动下载文件夹中的所有视频，命名自动按 自定义命名+01、02… 依次编号）。\n"
             "支持直接从 Excel / 表格工具复制后 <b>Ctrl+V</b> 粘贴到表格；"
             "也可右键插入行手动填写。命名留空将使用原文件标题。"
         )
@@ -305,7 +668,8 @@ class GDriveDownloaderUI(QWidget):
             "📌 支持的 Google Drive 链接格式：\n"
             "  • https://drive.google.com/file/d/{FILE_ID}/view\n"
             "  • https://drive.google.com/open?id={FILE_ID}\n"
-            "  • https://drive.google.com/uc?id={FILE_ID}"
+            "  • https://drive.google.com/uc?id={FILE_ID}\n"
+            "  • https://drive.google.com/drive/folders/{FOLDER_ID}  （文件夹链接：自动下载内部所有视频并追加 01、02 序号）"
         )
         fmt_label.setStyleSheet(
             "color: #6b7280; font-size: 8.5pt; font-family: Consolas, monospace;"
@@ -340,7 +704,7 @@ class GDriveDownloaderUI(QWidget):
 
         # 表格
         self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Google Drive 文件链接（视频/图片/文档均可）", "自定义命名（不含扩展名）"])
+        self.table.setHorizontalHeaderLabels(["Google Drive 文件/文件夹链接", "自定义命名（文件夹自动+01、02）"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -599,7 +963,7 @@ class GDriveDownloaderUI(QWidget):
 
         self.log_view.clear()
         self.progress_bar.setValue(0)
-        self.lbl_status.setText(f"准备下载 {len(tasks)} 个视频...")
+        self.lbl_status.setText(f"准备处理 {len(tasks)} 条下载任务...")
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
@@ -630,7 +994,7 @@ class GDriveDownloaderUI(QWidget):
         self.worker.all_done.connect(self._on_all_done)
         self.worker.start()
 
-        self._log(f"🚀 开始批量下载，共 {len(tasks)} 个视频")
+        self._log(f"🚀 开始批量下载，共 {len(tasks)} 条任务")
         self._log(f"📁 输出目录：{self.output_dir}")
 
     def _stop_download(self):

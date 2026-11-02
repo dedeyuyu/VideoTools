@@ -1172,4 +1172,10 @@ EN = {
     "🟫 字幕背景与装饰": "🟫 Subtitle background & decoration",
     "🧩 画面模板:": "🧩 Layout template:",
     "🧹 清理临时缓存": "🧹 Clear temp cache",
+    "Google Drive 文件/文件夹链接": "Google Drive file/folder link",
+    "自定义命名（文件夹自动+01、02）": "Custom name (folders auto-numbered +01, 02)",
+    "在下方表格中粘贴或输入下载任务。第一列为 Google Drive 链接，第二列为自定义命名（不含扩展名）。\n支持 <b>单文件链接</b>（视频、图片、PDF、文档等）以及 <b>谷歌云端文件夹链接</b>（自动下载文件夹中的所有视频，命名自动按 自定义命名+01、02… 依次编号）。\n支持直接从 Excel / 表格工具复制后 <b>Ctrl+V</b> 粘贴到表格；也可右键插入行手动填写。命名留空将使用原文件标题。": "Paste or enter download tasks in the table below. Column 1 is the Google Drive link, column 2 is a custom name (without extension).\nSupports <b>single file links</b> (videos, images, PDFs, documents, etc.) and <b>Google Drive folder links</b> (downloads all videos in the folder, named with CustomName+01, 02…).\nCopy from Excel / spreadsheets and press <b>Ctrl+V</b> to paste into the table, or right-click to insert rows manually. Leave the name empty to use the original file title.",
+    "📌 支持的 Google Drive 链接格式：\n  • https://drive.google.com/file/d/{FILE_ID}/view\n  • https://drive.google.com/open?id={FILE_ID}\n  • https://drive.google.com/uc?id={FILE_ID}\n  • https://drive.google.com/drive/folders/{FOLDER_ID}  （文件夹链接：自动下载内部所有视频并追加 01、02 序号）": "📌 Supported Google Drive link formats:\n  • https://drive.google.com/file/d/{FILE_ID}/view\n  • https://drive.google.com/open?id={FILE_ID}\n  • https://drive.google.com/uc?id={FILE_ID}\n  • https://drive.google.com/drive/folders/{FOLDER_ID}  (Folder link: downloads all videos inside with 01, 02 suffix)",
+    "准备处理 {0} 条下载任务...": "Preparing {0} download tasks...",
+    "🚀 开始批量下载，共 {0} 条任务": "🚀 Starting batch download, {0} tasks total",
 }
