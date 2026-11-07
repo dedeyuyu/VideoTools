@@ -15,18 +15,26 @@ from PyQt6.QtGui import (QPainterPathStroker, QImage, QPainter, QColor, QFont, Q
                          QTransform)
 
 from image_worker.duet_worker import (CANVAS_W, CANVAS_H, REF_W, REF_H, get_canvas_size, box_layout, get_install_root,
-                                     tpl_cells, ordered_cells, cell_rect_px, place_in_cell, SRC_LABELS,
+                                     tpl_cells, ordered_cells, cell_rect_px, place_in_cell, cell_rotation, SRC_LABELS,
                                      tpl_bg_color, tpl_divider, divider_rects, divider_lines,
                                      cell_poly_px, cell_label_rect_px, tpl_diag_ys)
 
 PERSON_COLOR = QColor("#90CDF4")   # 浅蓝：人物
 VIRAL_COLOR = QColor("#FBB6CE")    # 浅粉：主视频
 SRC_COLORS = {
-    "viral":   QColor("#FBB6CE"),   # 浅粉：主视频
-    "person":  QColor("#90CDF4"),   # 浅蓝：人物1
-    "person2": QColor("#9AE6B4"),   # 浅绿：人物2
-    "person3": QColor("#FBD38D"),   # 浅橙：人物3
-    "person4": QColor("#D6BCFA"),   # 浅紫：人物4
+    "viral":    QColor("#FBB6CE"),   # 浅粉：主视频
+    "person":   QColor("#90CDF4"),   # 浅蓝：人物1
+    "person2":  QColor("#9AE6B4"),   # 浅绿：人物2
+    "person3":  QColor("#FBD38D"),   # 浅橙：人物3
+    "person4":  QColor("#D6BCFA"),   # 浅紫：人物4
+    "person5":  QColor("#81E6D9"),   # 浅青：人物5
+    "person6":  QColor("#FEB2B2"),   # 珊瑚粉：人物6
+    "person7":  QColor("#FAF089"),   # 浅黄：人物7
+    "person8":  QColor("#B2F5EA"),   # 薄荷绿：人物8
+    "person9":  QColor("#E9D8FD"),   # 薰衣草：人物9
+    "person10": QColor("#FBB6CE"),   # 樱花粉：人物10
+    "person11": QColor("#C6F6D5"),   # 嫩芽绿：人物11
+    "person12": QColor("#FEEBC8"),   # 杏仁黄：人物12
 }
 
 _loaded_fonts = {}
@@ -76,6 +84,7 @@ def default_card(kind: str = "title") -> dict:
         # 文本基础
         "font_family": "Microsoft YaHei", "font_file": "",
         "size": 72, "bold": True, "italic": False, "weight": 700,
+        "auto_size": False, "max_lines": 3, "max_size": 96, "min_size": 24,
         "letter_spacing": 0, "rtl": False, "uppercase": False,
         "color": "#FFFFFF", "hl_color": "#FFD400",
         # 自动着色
@@ -189,7 +198,10 @@ def _draw_cell(p: QPainter, num: int, cell: dict, img, adj: dict, tpl: dict = No
                    f"{num + 1}\n{SRC_LABELS.get(src, src)}")
     else:
         p.fillRect(x, y, w, h, QColor("#000000"))
-        sw, sh, ox, oy = place_in_cell(img.width(), img.height(), w, h, cell, adj, tpl)
+        rot = cell_rotation(cell, adj)
+        if rot:
+            img = img.transformed(QTransform().rotate(float(rot)))
+        sw, sh, ox, oy = place_in_cell(img.width(), img.height(), w, h, cell, adj, tpl, already_rotated=True)
         p.drawImage(QRectF(x + ox, y + oy, sw, sh), img)
     p.restore()
 
@@ -916,10 +928,11 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float, canv_w: int = 
         sub_color_val = col
         sub_hl_color_val = hl_col
 
-    def make_lines(s, font, color, kind, avail):
+    def make_lines(s, font, color, kind, avail, sub_f=None):
         out = []
         if not s.strip():
             return out
+        use_sub_font = sub_f if sub_f is not None else sub_actual_font
         
         mask = _hl_mask(s, cfg) if kind == "main" else [False] * len(s)
         do_wrap = bool(cfg.get("wrap", True))
@@ -956,10 +969,10 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float, canv_w: int = 
             if b < len(s):
                 rem_text = s[b:].lstrip()
                 if rem_text:
-                    fm_sub = QFontMetricsF(sub_actual_font)
+                    fm_sub = QFontMetricsF(use_sub_font)
                     rem_mask = _hl_mask(rem_text, cfg)
                     for sa, sb in _wrap(rem_text, fm_sub, avail, do_wrap):
-                        out.append(_Line(rem_text[sa:sb], sub_actual_font, sub_color_val, sub_hl_color_val, rem_mask[sa:sb], "sub_line"))
+                        out.append(_Line(rem_text[sa:sb], use_sub_font, sub_color_val, sub_hl_color_val, rem_mask[sa:sb], "sub_line"))
             return out
         else:
             fm = QFontMetricsF(font)
@@ -968,8 +981,63 @@ def _draw_text_card(p: QPainter, cfg: dict, text: str, cx: float, canv_w: int = 
             return out
 
     icon_in_main = icon == "whatsapp" and split != "horizontal"
-    main_avail = max_w - (2 * icon_r + gap if icon_in_main else 0)
-    main_lines = make_lines(text, main_font, col, "main", main_avail)
+    if bool(cfg.get("auto_size")) and text.strip():
+        max_lines_lim = max(1, int(cfg.get("max_lines", 3) or 3))
+        base_sz = max(1.0, float(cfg.get("size", 72) or 72))
+        max_sz = max(10, int(cfg.get("max_size", max(int(base_sz), 96)) or 96))
+        min_sz = max(6, min(max_sz, int(cfg.get("min_size", 24) or 24)))
+        sub_ratio = float(cfg.get("sub_size", 40) or 40) / base_sz
+
+        def _try_sz(sz_val: int):
+            c_try = dict(cfg)
+            c_try["size"] = sz_val
+            f_m = _make_font(c_try)
+            if sub_enabled:
+                c_sub = dict(cfg)
+                c_sub["size"] = max(6, int(round(sz_val * sub_ratio)))
+                f_s = _make_font(c_sub)
+            else:
+                f_s = f_m
+            fm_m = QFontMetricsF(f_m)
+            ir = fm_m.height() * 0.48 if icon != "none" else 0.0
+            gp = fm_m.height() * 0.25
+            av = max(40.0, max_w - (2 * ir + gp if icon_in_main else 0.0))
+            lns = make_lines(text, f_m, col, "main", av, sub_f=f_s)
+            fits = (len(lns) <= max_lines_lim) and all(ln.w <= av * 1.01 for ln in lns)
+            return fits, lns, f_m, f_s, fm_m, ir, gp, av, c_try
+
+        fits_top, lns, f_m, f_s, fm_m, ir, gp, av, c_best = _try_sz(max_sz)
+        if fits_top:
+            best_pack = (lns, f_m, f_s, fm_m, ir, gp, av, c_best)
+        else:
+            lo, hi = min_sz, max_sz - 1
+            best_sz = min_sz
+            best_pack = None
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                ok, lns, f_m, f_s, fm_m, ir, gp, av, c_try = _try_sz(mid)
+                if ok:
+                    best_sz = mid
+                    best_pack = (lns, f_m, f_s, fm_m, ir, gp, av, c_try)
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            # 微调向上探测 1~3 字号，确保离散换行边界处取到可容纳的最大字号
+            for extra_sz in range(best_sz + 1, min(max_sz, best_sz + 3) + 1):
+                ok, lns, f_m, f_s, fm_m, ir, gp, av, c_try = _try_sz(extra_sz)
+                if ok:
+                    best_sz = extra_sz
+                    best_pack = (lns, f_m, f_s, fm_m, ir, gp, av, c_try)
+            if best_pack is None:
+                _, lns, f_m, f_s, fm_m, ir, gp, av, c_try = _try_sz(min_sz)
+                best_pack = (lns, f_m, f_s, fm_m, ir, gp, av, c_try)
+
+        main_lines, main_font, sub_actual_font, fm_main, icon_r, gap, main_avail, c_best = best_pack
+        lead_font = _make_font(c_best, float(cfg.get("lead_scale", 50)) / 100.0)
+        sub_font = _make_font(c_best, float(cfg.get("sub_scale", 40)) / 100.0)
+    else:
+        main_avail = max_w - (2 * icon_r + gap if icon_in_main else 0)
+        main_lines = make_lines(text, main_font, col, "main", main_avail)
     lead_lines = make_lines(lead, lead_font, cfg.get("lead_color", "#FFFFFF"), "lead", max_w)
     sub_lines = make_lines(sub, sub_font, cfg.get("sub_color", "#FFFFFF"), "sub", max_w)
 

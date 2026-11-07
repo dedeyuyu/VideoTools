@@ -9,7 +9,7 @@ else:
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root_dir)
 
-APP_VERSION = "1.5.19"
+APP_VERSION = "1.5.20"
 WINDOW_TITLES = (f"视频集成工具 v{APP_VERSION}", f"VideoTools v{APP_VERSION}")
 
 

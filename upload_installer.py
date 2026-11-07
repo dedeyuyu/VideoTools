@@ -8,7 +8,7 @@ token = os.environ.get("GITHUB_TOKEN") or open(os.path.join(os.path.dirname(os.p
 repo_owner = "dedeyuyu"
 repo_name = "VideoTools"
 
-installer_path = "output_installer/VideoTools_v1.5.19_Setup.exe"
+installer_path = "output_installer/VideoTools_v1.5.20_Setup.exe"
 asset_name = os.path.basename(installer_path)
 
 headers = {
@@ -18,9 +18,9 @@ headers = {
 
 # Create release
 release_payload = {
-    "tag_name": "v1.5.19",
-    "name": "VideoTools Release v1.5.19",
-    "body": "### v1.5.19 更新内容\n- **☁️ 谷歌云端下载支持文件夹链接**：支持直接粘贴 Google Drive 文件夹分享链接，自动解析并批量下载文件夹内的所有视频文件\n- **🔢 自定义命名自动加序号**：下载云盘文件夹时，自动按用户填写的自定义命名追加 `+01`、`+02`、`+03` 等序号进行区分（未填自定义命名时自动使用原文件名+序号）\n- **📊 文件夹子任务进度展示**：实时显示文件夹内第 X/N 个视频的下载进度与日志明细",
+    "tag_name": "v1.5.20",
+    "name": "VideoTools Release v1.5.20",
+    "body": "### v1.5.20 更新内容\n- **🧩 自定义多板块视频模板生成器（最多支持 13 板块）**：新增「平行分屏 / 不平行与斜线 / 画中画 / 🛠️ 自定义生成版式」四大分类，内置六格、七格、九格、十格（上1+下九宫格）等模板；支持自由设置行数与每行格数、自由指定任意板块为主视频，第 1 步时间线自动显示对应数量的板块列表\n- **🧲 画布自由增删拆分方框 + 智能对齐辅助线**：支持自由添加方框、左右/上下拆分为2格、添加画中画小窗、删除方框；拖拽移动或缩放方框时提供青色智能对齐辅助线与自动吸附，支持一键对齐吸附铺满\n- **🅰 标题/卡片文字根据字数自动缩放字号**：支持设置自动缩放最大行数、最大字号上限与最小字号下限，根据文案字数自动缩放字号，使文字不超过指定行数且尽量铺满限定宽度（让末行字数更均匀，短文案不超过最大字号上限）\n- **🔄 合拍视频新增画面旋转**：支持在模板及逐任务微调中对任意板块视频进行 0° / 90° / 180° / 270° 旋转",
     "draft": False,
     "prerelease": False
 }

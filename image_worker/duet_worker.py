@@ -310,16 +310,34 @@ def default_template(name: str = "默认上下分屏") -> dict:
 # 模板新格式：{"name": ..., "cells": [cell, ...]}
 # cell = {"src": 视频来源, "x","y","w","h": 占画布比例(0~1), "fill": 填充规则,
 #         "ox","oy": 偏移像素, "pip": 是否画中画小窗, "border": 白色边框像素}
-SOURCES = ["viral", "person", "person2", "person3", "person4"]
-SRC_LABELS = {"viral": "主视频", "person": "人物视频1", "person2": "人物视频2",
-              "person3": "人物视频3", "person4": "人物视频4"}
+SOURCES = ["viral", "person"] + [f"person{i}" for i in range(2, 13)]
+SRC_LABELS = {
+    "viral": "主视频",
+    "person": "人物视频1",
+    **{f"person{i}": f"人物视频{i}" for i in range(2, 13)},
+}
 FILL_MODES = [("cover", "铺满格子（超出裁切）"), ("width", "等宽对齐（宽=格子宽）"),
               ("height", "等高对齐（高=格子高）"), ("contain", "完整显示（留黑边）")]
+ROTATE_MODES = [
+    (0,   "不旋转 (0°)"),
+    (90,  "顺时针 90° (向右转)"),
+    (180, "旋转 180° (上下颠倒)"),
+    (270, "逆时针 90° (向左转)"),
+]
 
 
-def make_cell(src, x, y, w, h, fill="cover", pip=False, border=0, poly=None):
+def cell_rotation(cell: dict = None, adj: dict = None) -> int:
+    """计算格子内视频的总顺时针旋转角度（0 / 90 / 180 / 270）：模板格子旋转 + 任务单项微调旋转。"""
+    r1 = int((cell or {}).get("rotate", 0) or 0)
+    r2 = int((adj or {}).get("rotate", 0) or 0)
+    return int(round((r1 + r2) / 90.0) * 90) % 360
+
+
+def make_cell(src, x, y, w, h, fill="cover", pip=False, border=0, poly=None, rotate=0):
     c = {"src": src, "x": x, "y": y, "w": w, "h": h, "fill": fill,
          "ox": 0, "oy": 0, "pip": pip, "border": border}
+    if rotate:
+        c["rotate"] = int(rotate) % 360
     if poly:
         c["poly"] = [[float(px), float(py)] for px, py in poly]
     return c
@@ -408,54 +426,204 @@ def cell_label_rect_px(cell: dict, tpl: dict = None) -> tuple:
         return x, y, w, h
 
 
+def auto_assign_cell_sources(cells: list, viral_idx: int = None) -> list:
+    """自动为格子列表分配不重复的视频来源：指定 viral_idx 为主视频，其余依次为 人物视频1..12。"""
+    if not cells:
+        return cells
+    if viral_idx is None:
+        viral_idx = next((i for i, c in enumerate(cells) if c.get("src") == "viral"), 0)
+    viral_idx = max(0, min(len(cells) - 1, int(viral_idx)))
+    person_srcs = [s for s in SOURCES if s != "viral"]
+    p_idx = 0
+    for i, c in enumerate(cells):
+        if i == viral_idx:
+            c["src"] = "viral"
+        else:
+            c["src"] = person_srcs[p_idx % len(person_srcs)]
+            p_idx += 1
+    return cells
+
+
+def make_row_grid_cells(row_cols: list, row_heights: list = None, viral_index: int = 0, fill: str = "cover") -> list:
+    """
+    按「每行几格」快速生成平行分割线版式。
+    row_cols: 例如 [1, 3, 3] 表示上1、中3、下3 共7格；
+    row_heights: 每行高度比例列表（自动归一化），为 None 时若首行为1格且总行数>=3则首行占0.5，其余平分。
+    viral_index: 哪一个格子（0-based）设为主视频。
+    """
+    rows = [max(1, int(c)) for c in (row_cols or [1, 1]) if int(c) >= 1]
+    if not rows:
+        rows = [1, 1]
+    n_rows = len(rows)
+    if row_heights and len(row_heights) == n_rows and sum(row_heights) > 0:
+        total_h = float(sum(row_heights))
+        hs = [float(h) / total_h for h in row_heights]
+    else:
+        if n_rows >= 3 and rows[0] == 1:
+            rem = 0.5 / (n_rows - 1)
+            hs = [0.5] + [rem] * (n_rows - 1)
+        else:
+            hs = [1.0 / n_rows] * n_rows
+
+    cells = []
+    y = 0.0
+    for r_i, (n_col, rh) in enumerate(zip(rows, hs)):
+        if r_i == n_rows - 1:
+            rh = max(0.05, 1.0 - y)
+        cw = 1.0 / n_col
+        for c_i in range(n_col):
+            cx = c_i * cw
+            w = (1.0 - cx) if c_i == n_col - 1 else cw
+            cells.append(make_cell("person", round(cx, 6), round(y, 6), round(w, 6), round(rh, 6), fill=fill))
+        y += rh
+    return auto_assign_cell_sources(cells, viral_idx=viral_index)
+
+
+def snap_and_fill_cells(cells: list, tol: float = 0.035) -> list:
+    """
+    自动吸附并消除相邻方框之间的微小缝隙，使边缘对齐到画布边界 (0, 1)、常用等分线与相邻格子边缘。
+    仅处理普通矩形格子（跳过画中画 pip 与多边形斜切 poly）。
+    """
+    rect_cells = [c for c in (cells or []) if not c.get("pip") and not c.get("poly")]
+    if not rect_cells:
+        return cells
+    T = 1.0 / 3.0
+    std_targets = [0.0, 0.25, T, 0.5, 2.0 * T, 0.75, 1.0]
+
+    def snap_1d(vals: list) -> dict:
+        # 先把接近的坐标聚类合并，再吸附到标准分位线/边界
+        sorted_v = sorted(vals)
+        groups = []
+        for v in sorted_v:
+            if not groups or abs(v - groups[-1][-1]) > tol:
+                groups.append([v])
+            else:
+                groups[-1].append(v)
+        mapping = {}
+        for g in groups:
+            avg = sum(g) / len(g)
+            best_t = avg
+            best_d = tol
+            # 优先吸附画布边界 0.0 和 1.0
+            if abs(avg - 0.0) <= tol * 1.3:
+                best_t = 0.0
+            elif abs(avg - 1.0) <= tol * 1.3:
+                best_t = 1.0
+            else:
+                for t in std_targets:
+                    d = abs(avg - t)
+                    if d <= best_d:
+                        best_d = d
+                        best_t = t
+            for v in g:
+                mapping[v] = round(max(0.0, min(1.0, best_t)), 6)
+        return mapping
+
+    xs, ys = [], []
+    for c in rect_cells:
+        x1, y1 = float(c.get("x", 0)), float(c.get("y", 0))
+        x2, y2 = x1 + float(c.get("w", 0.5)), y1 + float(c.get("h", 0.5))
+        xs.extend([x1, x2])
+        ys.extend([y1, y2])
+    map_x = snap_1d(xs)
+    map_y = snap_1d(ys)
+    for c in rect_cells:
+        x1, y1 = float(c.get("x", 0)), float(c.get("y", 0))
+        x2, y2 = x1 + float(c.get("w", 0.5)), y1 + float(c.get("h", 0.5))
+        nx1 = map_x.get(x1, x1)
+        nx2 = map_x.get(x2, x2)
+        ny1 = map_y.get(y1, y1)
+        ny2 = map_y.get(y2, y2)
+        if nx2 - nx1 >= 0.05:
+            c["x"], c["w"] = round(nx1, 6), round(nx2 - nx1, 6)
+        if ny2 - ny1 >= 0.05:
+            c["y"], c["h"] = round(ny1, 6), round(ny2 - ny1, 6)
+    return cells
+
+
 def _layout_presets():
     T = 1.0 / 3
     pw, m = 0.28, 0.03                 # 小窗宽度、边距（画布 9:16，小窗也是 9:16 → 高度比例 = 宽度比例）
     py = 1 - 0.12 - pw                 # 小窗离底部留出一点空间
     full = make_cell("viral", 0, 0, 1, 1)
-    pip = lambda src, x: make_cell(src, x, py, pw, pw, pip=True, border=6)
+    pip = lambda src, x, y=py, w=pw: make_cell(src, x, y, w, w, pip=True, border=6)
     return [
-        ("常用", "斜线分屏（左低右高·主上人下）", make_diag_cells("viral", "person", 0.745, 0.255)),
-        ("常用", "斜线分屏（左低右高·人上主下）", make_diag_cells("person", "viral", 0.745, 0.255)),
-        ("常用", "斜线分屏（左高右低·主上人下）", make_diag_cells("viral", "person", 0.255, 0.745)),
-        ("常用", "斜线分屏（左高右低·人上主下）", make_diag_cells("person", "viral", 0.255, 0.745)),
-        ("常用", "上1 / 下1", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, 1, .5)]),
-        ("常用", "左1 / 右1", [make_cell("viral", 0, 0, .5, 1), make_cell("person", .5, 0, .5, 1)]),
-        ("常用", "左右分屏（居中，底部留白）", [make_cell("viral", 0, .2, .5, .5625),
+        # ── 1. 平行分屏（分割线平行：上下、左右、多行多格拼接，最常用） ──
+        ("平行分屏", "上1 / 下1", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, 1, .5)]),
+        ("平行分屏", "左1 / 右1", [make_cell("viral", 0, 0, .5, 1), make_cell("person", .5, 0, .5, 1)]),
+        ("平行分屏", "左右分屏（居中，底部留白）", [make_cell("viral", 0, .2, .5, .5625),
                                          make_cell("person", .5, .2, .5, .5625)]),
-        ("常用", "上1/3 / 下2/3", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, 1 - T)]),
-        ("常用", "上2/3 / 下1/3", [make_cell("viral", 0, 0, 1, 2 * T), make_cell("person", 0, 2 * T, 1, T)]),
-        ("常用", "纵向三等分", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, T),
+        ("平行分屏", "上1/3 / 下2/3", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, 1 - T)]),
+        ("平行分屏", "上2/3 / 下1/3", [make_cell("viral", 0, 0, 1, 2 * T), make_cell("person", 0, 2 * T, 1, T)]),
+        ("平行分屏", "纵向三等分（上中下）", [make_cell("viral", 0, 0, 1, T), make_cell("person", 0, T, 1, T),
                            make_cell("person2", 0, 2 * T, 1, T)]),
-        ("多格", "上1 / 下2", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, .5, .5),
+        ("平行分屏", "上1 / 下2", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, .5, .5),
                             make_cell("person2", .5, .5, .5, .5)]),
-        ("多格", "上2 / 下1", [make_cell("person", 0, 0, .5, .5), make_cell("person2", .5, 0, .5, .5),
+        ("平行分屏", "上2 / 下1", [make_cell("person", 0, 0, .5, .5), make_cell("person2", .5, 0, .5, .5),
                             make_cell("viral", 0, .5, 1, .5)]),
-        ("多格", "上1 / 下3", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, T, .5),
+        ("平行分屏", "上1 / 下3", [make_cell("viral", 0, 0, 1, .5), make_cell("person", 0, .5, T, .5),
                             make_cell("person2", T, .5, T, .5), make_cell("person3", 2 * T, .5, T, .5)]),
-        ("多格", "上1 / 下4", [make_cell("viral", 0, 0, 1, .5),
+        ("平行分屏", "上1 / 下4（田字底）", [make_cell("viral", 0, 0, 1, .5),
                             make_cell("person", 0, .5, .5, .25), make_cell("person2", .5, .5, .5, .25),
                             make_cell("person3", 0, .75, .5, .25), make_cell("person4", .5, .75, .5, .25)]),
-        ("多格", "五格（左2右1 / 下2）", [
+        ("平行分屏", "四宫格（2×2）", make_row_grid_cells([2, 2], [0.5, 0.5], viral_index=0)),
+        ("平行分屏", "六格（上1 / 中2 / 下3）", make_row_grid_cells([1, 2, 3], [0.50, 0.25, 0.25], viral_index=0)),
+        ("平行分屏", "六格（上1 / 中3 / 下2）", make_row_grid_cells([1, 3, 2], [0.50, 0.25, 0.25], viral_index=0)),
+        ("平行分屏", "七格（上1 / 中3 / 下3）", make_row_grid_cells([1, 3, 3], [0.50, 0.25, 0.25], viral_index=0)),
+        ("平行分屏", "十格（上1 / 下九宫格3×3）", make_row_grid_cells([1, 3, 3, 3], [0.52, 0.16, 0.16, 0.16], viral_index=0)),
+
+        # ── 2. 不平行 / 错位与斜线（分割线不平行或错位T字/十字拼接） ──
+        ("不平行/斜线", "斜线分屏（左低右高·主上人下）", make_diag_cells("viral", "person", 0.745, 0.255)),
+        ("不平行/斜线", "斜线分屏（左低右高·人上主下）", make_diag_cells("person", "viral", 0.745, 0.255)),
+        ("不平行/斜线", "斜线分屏（左高右低·主上人下）", make_diag_cells("viral", "person", 0.255, 0.745)),
+        ("不平行/斜线", "斜线分屏（左高右低·人上主下）", make_diag_cells("person", "viral", 0.255, 0.745)),
+        ("不平行/斜线", "五格（左2右1 / 下2）", [
             make_cell("viral", .38, 0, .62, 2 * T),
             make_cell("person", 0, 0, .38, T),
             make_cell("person2", 0, T, .38, T),
             make_cell("person3", 0, 2 * T, .5, 1 - 2 * T),
             make_cell("person4", .5, 2 * T, .5, 1 - 2 * T),
         ]),
-        ("多格", "五格（左1右2 / 下2）", [
+        ("不平行/斜线", "五格（左1右2 / 下2）", [
             make_cell("viral", 0, 0, .62, 2 * T),
             make_cell("person", .62, 0, .38, T),
             make_cell("person2", .62, T, .38, T),
             make_cell("person3", 0, 2 * T, .5, 1 - 2 * T),
             make_cell("person4", .5, 2 * T, .5, 1 - 2 * T),
         ]),
-        ("多格", "四宫格", [make_cell("viral", 0, 0, .5, .5), make_cell("person", .5, 0, .5, .5),
-                         make_cell("person2", 0, .5, .5, .5), make_cell("person3", .5, .5, .5, .5)]),
-        ("画中画", "全屏背景 + 小窗", [full, pip("person", 1 - m - pw)]),
+        ("不平行/斜线", "七格（左2中1右2 / 下2）", [
+            make_cell("viral", .25, 0, .50, 2 * T),
+            make_cell("person", 0, 0, .25, T),
+            make_cell("person2", 0, T, .25, T),
+            make_cell("person3", .75, 0, .25, T),
+            make_cell("person4", .75, T, .25, T),
+            make_cell("person5", 0, 2 * T, .50, 1 - 2 * T),
+            make_cell("person6", .50, 2 * T, .50, 1 - 2 * T),
+        ]),
+        ("不平行/斜线", "九格（左2右1 / 下左4右2）", [
+            make_cell("viral", .32, 0, .68, 2 * T),
+            make_cell("person", 0, 0, .32, T),
+            make_cell("person2", 0, T, .32, T),
+            make_cell("person3", 0, 2 * T, .16, (1 - 2 * T) * .5),
+            make_cell("person4", .16, 2 * T, .16, (1 - 2 * T) * .5),
+            make_cell("person5", 0, 2 * T + (1 - 2 * T) * .5, .16, (1 - 2 * T) * .5),
+            make_cell("person6", .16, 2 * T + (1 - 2 * T) * .5, .16, (1 - 2 * T) * .5),
+            make_cell("person7", .32, 2 * T, .34, 1 - 2 * T),
+            make_cell("person8", .66, 2 * T, .34, 1 - 2 * T),
+        ]),
+
+        # ── 3. 画中画（背景 + 可自由增删的悬浮小窗口） ──
+        ("画中画", "全屏背景 + 单小窗", [full, pip("person", 1 - m - pw)]),
         ("画中画", "全屏背景 + 双小窗", [full, pip("person", m), pip("person2", 1 - m - pw)]),
         ("画中画", "全屏背景 + 三小窗", [full, pip("person", m), pip("person2", (1 - pw) / 2),
                                     pip("person3", 1 - m - pw)]),
+        ("画中画", "全屏背景 + 四小窗", [
+            full,
+            pip("person", 0.02, 0.64, 0.22),
+            pip("person2", 0.26, 0.64, 0.22),
+            pip("person3", 0.52, 0.64, 0.22),
+            pip("person4", 0.76, 0.64, 0.22),
+        ]),
     ]
 
 
@@ -481,7 +649,7 @@ def tpl_cells(tpl: dict) -> list:
     out = []
     for src, y, h, key in ((top_src, 0.0, s, "top"), (bot_src, s, 1 - s, "bottom")):
         b = tpl.get(key, {}) or {}
-        cell = make_cell(src, 0.0, y, 1.0, h, fill=b.get("fill", "width"))
+        cell = make_cell(src, 0.0, y, 1.0, h, fill=b.get("fill", "width"), rotate=int(b.get("rotate", 0) or 0))
         cell["ox"], cell["oy"] = int(b.get("ox", 0)), int(b.get("oy", 0))
         if b.get("ref_size"):
             cell["ref_size"] = list(b["ref_size"])
@@ -618,12 +786,16 @@ def _ff_color(hexc: str) -> str:
     return "0x" + (h.upper() if len(h) == 6 else "000000")
 
 
-def place_in_cell(src_w: int, src_h: int, cw: int, ch: int, cell: dict, adj: dict = None, tpl: dict = None) -> tuple:
+def place_in_cell(src_w: int, src_h: int, cw: int, ch: int, cell: dict, adj: dict = None, tpl: dict = None,
+                  already_rotated: bool = False) -> tuple:
     """视频在格子内的缩放尺寸与位置（相对格子左上角）。返回 (sw, sh, x, y)"""
     adj = adj or {}
     canv_w, canv_h = get_canvas_size(tpl)
     if src_w <= 0 or src_h <= 0:
         src_w, src_h = canv_w, canv_h
+    rot = cell_rotation(cell, adj)
+    if not already_rotated and rot in (90, 270):
+        src_w, src_h = src_h, src_w
     ref = cell.get("ref_size")
     if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
         ref_w, ref_h = float(ref[0]), float(ref[1])
@@ -634,9 +806,9 @@ def place_in_cell(src_w: int, src_h: int, cw: int, ch: int, cell: dict, adj: dic
     fill = cell.get("fill", "cover")
     sx, sy = cw / src_w, ch / src_h
     s = {"width": sx, "height": sy, "contain": min(sx, sy)}.get(fill, max(sx, sy))
-    # 当切换画布尺寸（如从 9:16 切换到 16:9 / 4:3 / 1:1 / 3:4）时，
-    # 旧版模板中的等宽/等高若不足以铺满新比例下的格子，自动升级为 cover 避免留黑边
-    if is_adapted and fill in ("width", "height") and s < max(sx, sy):
+    # 当切换画布尺寸（如从 9:16 切换到 16:9 / 4:3 / 1:1 / 3:4）或旋转 90°/270° 时，
+    # 旧版模板中的等宽/等高若不足以铺满格子，自动升级为 cover 避免留黑边
+    if (is_adapted or rot in (90, 270)) and fill in ("width", "height") and s < max(sx, sy):
         s = max(sx, sy)
     s *= float(adj.get("scale", 100)) / 100.0
     sw, sh = _even(src_w * s), _even(src_h * s)
@@ -954,7 +1126,9 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
             div_done = True
         x, y, w, h = cell_rect_px(cl, tpl)
         info = src_info[cl["src"]]
-        sw, sh, ox, oy = place_in_cell(info[1], info[2], w, h, cl, adj.get(cl["src"]), tpl)
+        c_adj = adj.get(cl["src"])
+        rot = cell_rotation(cl, c_adj)
+        sw, sh, ox, oy = place_in_cell(info[1], info[2], w, h, cl, c_adj, tpl)
         lab = labels[cl["src"]].pop(0)
         b = int(cl.get("border", 0) or 0)
         if b > 0 and k not in cell_mask_idx:
@@ -962,7 +1136,8 @@ def build_render_cmd(task: dict, tpl: dict, out_path: str, *,
             fc.append(f"[{last}][bd{k}]overlay={x - b}:{y - b}[lb{k}]")
             last = f"lb{k}"
         fc.append(f"color=c=black:s={w}x{h}:r=30:d={D:.3f}[box{k}]")
-        fc.append(f"[{lab}]scale={sw}:{sh},setsar=1[sv{k}]")
+        rot_f = {90: "transpose=1,", 180: "hflip,vflip,", 270: "transpose=2,"}.get(rot, "")
+        fc.append(f"[{lab}]{rot_f}scale={sw}:{sh},setsar=1[sv{k}]")
         if k in cell_mask_idx:
             m_idx = cell_mask_idx[k]
             fc.append(f"[box{k}][sv{k}]overlay=x={ox}:y={oy}:eof_action=repeat,format=yuva420p[cb_raw{k}]")

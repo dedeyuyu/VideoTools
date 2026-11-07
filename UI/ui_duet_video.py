@@ -31,9 +31,10 @@ from image_worker.duet_worker import (
     default_template, box_layout, build_render_cmd, run_cmd, CANVAS_W, CANVAS_H,
     REF_W, REF_H, ASPECT_RATIOS, ASPECT_RESOLUTIONS,
     set_canvas_aspect, get_canvas_aspect, get_canvas_size,
-    SOURCES, SRC_LABELS, FILL_MODES, LAYOUT_PRESETS, template_from_cells, tpl_cells,
+    SOURCES, SRC_LABELS, FILL_MODES, ROTATE_MODES, LAYOUT_PRESETS, template_from_cells, tpl_cells,
     sources_used, cell_rect_px, task_source, task_source_meta, tpl_bg_color, tpl_divider,
-    tpl_diag_ys, set_tpl_diag_ys,
+    tpl_diag_ys, set_tpl_diag_ys, make_cell, make_diag_cells, make_row_grid_cells,
+    auto_assign_cell_sources, snap_and_fill_cells,
 )
 from image_worker.duet_render import (
  render_watermark_layer,    default_card, template_icon, compose_preview, render_card_layer, load_font_file,
@@ -390,12 +391,13 @@ class VideoListWidget(QListWidget):
 
 
 class CanvasView(QWidget):
-    """按当前画布比例（9:16 / 3:4 / 1:1 / 4:3 / 16:9）显示合成画面；可编辑模式下：拖动格子分界线、拖动/缩放画中画小窗、点击选中格子。"""
+    """按当前画布比例（9:16 / 3:4 / 1:1 / 4:3 / 16:9）显示合成画面；可编辑模式下：拖动格子分界线、自由移动/缩放单个方框（带智能对齐辅助线与吸附）、拖动/缩放画中画小窗、点击选中格子。"""
     splitDragged = pyqtSignal(float)
     cellsChanged = pyqtSignal(list)
     cellSelected = pyqtSignal(int)
 
     MIN_FRAC = 0.05
+    SNAP_TOL = 0.016
 
     def __init__(self, draggable=False, parent=None):
         super().__init__(parent)
@@ -404,9 +406,21 @@ class CanvasView(QWidget):
         self._draggable = draggable
         self._cells = None
         self._drag = None
+        self._selected = 0
+        self._free_box_mode = False
+        self._guides_x = []   # [(frac_x, label_str), ...]
+        self._guides_y = []   # [(frac_y, label_str), ...]
         self.setMinimumSize(240, 240)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
+
+    def set_selected(self, idx: int):
+        self._selected = int(idx)
+        self.update()
+
+    def set_free_box_mode(self, enabled: bool):
+        self._free_box_mode = bool(enabled)
+        self.update()
 
     def set_image(self, img, split_ratio=None):
         self._img = img
@@ -429,6 +443,41 @@ class CanvasView(QWidget):
     def _to_frac(self, pos):
         r = self._rect()
         return (pos.x() - r.left()) / max(1, r.width()), (pos.y() - r.top()) / max(1, r.height())
+
+    def _snap_targets(self, exclude_idx: int = -1):
+        """返回 (x_targets, y_targets)，每项为 [(coord, label), ...]，包含画布边界、等分线及其它格子的边缘/中心。"""
+        T = 1.0 / 3.0
+        tx = [
+            (0.0, "0%"), (0.25, "25%"), (T, "1/3"), (0.5, "50%"),
+            (2.0 * T, "2/3"), (0.75, "75%"), (1.0, "100%"),
+        ]
+        ty = list(tx)
+        for i, cl in enumerate(self._cells or []):
+            if i == exclude_idx or cl.get("poly"):
+                continue
+            x1, y1 = float(cl["x"]), float(cl["y"])
+            x2, y2 = x1 + float(cl["w"]), y1 + float(cl["h"])
+            xm, ym = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+            tx.extend([(x1, f"格{i+1}左"), (x2, f"格{i+1}右"), (xm, f"格{i+1}中")])
+            ty.extend([(y1, f"格{i+1}上"), (y2, f"格{i+1}下"), (ym, f"格{i+1}中")])
+        return tx, ty
+
+    def _snap_val(self, val: float, targets: list, tol: float = None):
+        """若 val 接近某个 target，返回 (snapped_val, (snapped_val, label))；否则返回 (val, None)。"""
+        if tol is None:
+            tol = self.SNAP_TOL
+        best_v = val
+        best_d = tol
+        best_g = None
+        for tv, lbl in targets:
+            # 画布外边界吸附范围略放大，方便铺满画面
+            cur_tol = tol * 1.35 if tv in (0.0, 1.0) else tol
+            d = abs(val - tv)
+            if d <= cur_tol and d <= best_d:
+                best_d = d
+                best_v = tv
+                best_g = (tv, lbl)
+        return best_v, best_g
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -458,7 +507,7 @@ class CanvasView(QWidget):
                     p.drawEllipse(pt, 6, 6)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(pen)
-            for cl in self._cells:
+            for idx, cl in enumerate(self._cells):
                 x = r.left() + cl["x"] * r.width()
                 y = r.top() + cl["y"] * r.height()
                 w, h = cl["w"] * r.width(), cl["h"] * r.height()
@@ -478,6 +527,49 @@ class CanvasView(QWidget):
                         p.drawLine(QPointF(x, y), QPointF(x, y + h))
                     if cl["y"] > 0.001:
                         p.drawLine(QPointF(x, y), QPointF(x + w, y))
+
+            # 为当前选中方框绘制 8 个缩放控制手柄（四角 + 四边中点）
+            if 0 <= self._selected < len(self._cells):
+                sel = self._cells[self._selected]
+                if not sel.get("poly"):
+                    sx = r.left() + sel["x"] * r.width()
+                    sy = r.top() + sel["y"] * r.height()
+                    sw, sh = sel["w"] * r.width(), sel["h"] * r.height()
+                    hs = 5.0
+                    p.setPen(QPen(QColor("#1A202C"), 1.5))
+                    p.setBrush(QColor("#00E5FF"))
+                    pts = [
+                        (sx, sy), (sx + sw * 0.5, sy), (sx + sw, sy),
+                        (sx, sy + sh * 0.5), (sx + sw, sy + sh * 0.5),
+                        (sx, sy + sh), (sx + sw * 0.5, sy + sh), (sx + sw, sy + sh),
+                    ]
+                    for hx, hy in pts:
+                        p.drawRect(QRectF(hx - hs, hy - hs, hs * 2, hs * 2))
+
+            # 绘制智能对齐辅助线（青色虚线 + 对齐标签）
+            if self._guides_x or self._guides_y:
+                g_pen = QPen(QColor("#00E5FF"), 2.0, Qt.PenStyle.DashLine)
+                f_g = QFont("Microsoft YaHei", 8)
+                f_g.setBold(True)
+                p.setFont(f_g)
+                for gx, lbl in self._guides_x:
+                    px = r.left() + gx * r.width()
+                    p.setPen(g_pen)
+                    p.drawLine(QPointF(px, r.top()), QPointF(px, r.bottom()))
+                    if lbl:
+                        tag_r = QRectF(min(r.right() - 48, max(r.left() + 2, px - 24)), r.top() + 4, 48, 18)
+                        p.fillRect(tag_r, QColor(0, 229, 255, 220))
+                        p.setPen(QColor("#1A202C"))
+                        p.drawText(tag_r, Qt.AlignmentFlag.AlignCenter, lbl)
+                for gy, lbl in self._guides_y:
+                    py = r.top() + gy * r.height()
+                    p.setPen(g_pen)
+                    p.drawLine(QPointF(r.left(), py), QPointF(r.right(), py))
+                    if lbl:
+                        tag_r = QRectF(r.left() + 4, min(r.bottom() - 20, max(r.top() + 2, py - 9)), 48, 18)
+                        p.fillRect(tag_r, QColor(0, 229, 255, 220))
+                        p.setPen(QColor("#1A202C"))
+                        p.drawText(tag_r, Qt.AlignmentFlag.AlignCenter, lbl)
         elif self._draggable:
             y = r.top() + r.height() * self._split
             p.setPen(QPen(QColor("#F6E05E"), 2))
@@ -490,7 +582,31 @@ class CanvasView(QWidget):
             return None
         r = self._rect()
         fx, fy = self._to_frac(pos)
-        tolx, toly = 8 / max(1, r.width()), 8 / max(1, r.height())
+        tolx, toly = 9 / max(1, r.width()), 9 / max(1, r.height())
+
+        # 0) 当前选中方框的四角控制点（以及自由方框模式下的四边中点/边线）
+        if 0 <= self._selected < len(self._cells):
+            sel = self._cells[self._selected]
+            if not sel.get("poly") and not sel.get("pip"):
+                x1, y1 = sel["x"], sel["y"]
+                x2, y2 = x1 + sel["w"], y1 + sel["h"]
+                xm, ym = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+                for tag, cx, cy in (("nw", x1, y1), ("ne", x2, y1), ("sw", x1, y2), ("se", x2, y2)):
+                    if abs(fx - cx) < tolx * 1.6 and abs(fy - cy) < toly * 1.6:
+                        return ("cell_corner", self._selected, tag)
+                if self._free_box_mode:
+                    for tag, cx, cy in (("n", xm, y1), ("s", xm, y2), ("w", x1, ym), ("e", x2, ym)):
+                        if abs(fx - cx) < tolx * 1.6 and abs(fy - cy) < toly * 1.6:
+                            return ("cell_edge", self._selected, tag)
+                    if abs(fx - x1) < tolx and y1 <= fy <= y2:
+                        return ("cell_edge", self._selected, "w")
+                    if abs(fx - x2) < tolx and y1 <= fy <= y2:
+                        return ("cell_edge", self._selected, "e")
+                    if abs(fy - y1) < toly and x1 <= fx <= x2:
+                        return ("cell_edge", self._selected, "n")
+                    if abs(fy - y2) < toly and x1 <= fx <= x2:
+                        return ("cell_edge", self._selected, "s")
+
         # 1) 画中画小窗（最上层优先）
         for i in reversed(range(len(self._cells))):
             cl = self._cells[i]
@@ -515,32 +631,36 @@ class CanvasView(QWidget):
                     return ("diag_mid", yl, yr, fy)
                 if 0.0 <= fy <= 1.0:
                     return ("select", 0 if fy <= y_line else 1)
-        # 2) 普通格子的内部分界线
-        best = None
-        for cl in self._cells:
-            if cl.get("pip") or cl.get("poly"):
-                continue
-            for axis, v, lo, hi, d in (
-                    ("x", cl["x"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"])),
-                    ("x", cl["x"] + cl["w"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"] - cl["w"])),
-                    ("y", cl["y"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"])),
-                    ("y", cl["y"] + cl["h"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"] - cl["h"]))):
-                # 画布四周的外边也可以拖动（把格子往里收，留出背景区域）
-                along = fy if axis == "x" else fx
-                tol = tolx if axis == "x" else toly
-                if d < tol and lo <= along <= hi and (best is None or d < best[3]):
-                    best = ("edge", axis, v, d)
-        if best:
-            return best[:3]
-        # 3) 普通格子内部 → 选中
-        for i, cl in enumerate(self._cells):
+        # 2) 普通格子的内部分界线（非自由单格模式时联动相邻边）
+        if not self._free_box_mode:
+            best = None
+            for cl in self._cells:
+                if cl.get("pip") or cl.get("poly"):
+                    continue
+                for axis, v, lo, hi, d in (
+                        ("x", cl["x"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"])),
+                        ("x", cl["x"] + cl["w"], cl["y"], cl["y"] + cl["h"], abs(fx - cl["x"] - cl["w"])),
+                        ("y", cl["y"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"])),
+                        ("y", cl["y"] + cl["h"], cl["x"], cl["x"] + cl["w"], abs(fy - cl["y"] - cl["h"]))):
+                    along = fy if axis == "x" else fx
+                    tol = tolx if axis == "x" else toly
+                    if d < tol and lo <= along <= hi and (best is None or d < best[3]):
+                        best = ("edge", axis, v, d)
+            if best:
+                return best[:3]
+        # 3) 普通格子内部 → 选中（自由方框模式下支持直接拖拽移动整个方框）
+        for i in reversed(range(len(self._cells))):
+            cl = self._cells[i]
             if not cl.get("pip") and cl["x"] <= fx <= cl["x"] + cl["w"] and cl["y"] <= fy <= cl["y"] + cl["h"]:
+                if self._free_box_mode and not cl.get("poly"):
+                    return ("cell_move", i)
                 return ("select", i)
         return None
 
     def mousePressEvent(self, e):
         if not self._draggable:
             return
+        self._guides_x, self._guides_y = [], []
         if self._cells is None:
             r = self._rect()
             if abs(e.position().y() - (r.top() + r.height() * self._split)) < 10:
@@ -550,17 +670,20 @@ class CanvasView(QWidget):
         if not hit:
             return
         fx, fy = self._to_frac(e.position())
-        if hit[0] in ("move", "resize", "select"):
+        if hit[0] in ("move", "resize", "select", "cell_move", "cell_corner", "cell_edge"):
+            self._selected = hit[1]
             self.cellSelected.emit(hit[1])
         if hit[0] in ("diag_left", "diag_right", "diag_mid"):
             self._drag = hit
             return
-        if hit[0] == "move":
+        if hit[0] in ("move", "cell_move"):
             cl = self._cells[hit[1]]
-            self._drag = ("move", hit[1], fx - cl["x"], fy - cl["y"])
+            self._drag = (hit[0], hit[1], fx - cl["x"], fy - cl["y"])
         elif hit[0] == "resize":
             cl = self._cells[hit[1]]
             self._drag = ("resize", hit[1], cl["h"] / max(1e-6, cl["w"]))
+        elif hit[0] in ("cell_corner", "cell_edge"):
+            self._drag = hit
         elif hit[0] == "edge":
             axis, v0 = hit[1], hit[2]
             pos, size = ("x", "w") if axis == "x" else ("y", "h")
@@ -604,9 +727,13 @@ class CanvasView(QWidget):
                         cur = Qt.CursorShape.SizeVerCursor
                 elif hit and hit[0] in ("diag_left", "diag_right", "diag_mid"):
                     cur = Qt.CursorShape.SizeVerCursor
+                elif hit and hit[0] == "cell_corner":
+                    cur = Qt.CursorShape.SizeFDiagCursor if hit[2] in ("nw", "se") else Qt.CursorShape.SizeBDiagCursor
+                elif hit and hit[0] == "cell_edge":
+                    cur = Qt.CursorShape.SizeHorCursor if hit[2] in ("w", "e") else Qt.CursorShape.SizeVerCursor
                 elif hit and hit[0] == "edge":
                     cur = Qt.CursorShape.SizeHorCursor if hit[1] == "x" else Qt.CursorShape.SizeVerCursor
-                elif hit and hit[0] == "move":
+                elif hit and hit[0] in ("move", "cell_move"):
                     cur = Qt.CursorShape.SizeAllCursor
                 elif hit and hit[0] == "resize":
                     cur = Qt.CursorShape.SizeFDiagCursor
@@ -619,6 +746,7 @@ class CanvasView(QWidget):
             self.update()
             return
         m = self.MIN_FRAC
+        self._guides_x, self._guides_y = [], []
         if d[0] == "diag_left":
             _, yl0, yr0 = d
             set_tpl_diag_ys(self._cells, max(0.05, min(0.95, fy)), yr0)
@@ -630,18 +758,64 @@ class CanvasView(QWidget):
             dy = fy - fy0
             dy = max(0.05 - min(yl0, yr0), min(0.95 - max(yl0, yr0), dy))
             set_tpl_diag_ys(self._cells, yl0 + dy, yr0 + dy)
-        elif d[0] == "move":
-            cl = self._cells[d[1]]
-            cl["x"] = max(0.0, min(1 - cl["w"], fx - d[2]))
-            cl["y"] = max(0.0, min(1 - cl["h"], fy - d[3]))
+        elif d[0] in ("move", "cell_move"):
+            idx = d[1]
+            cl = self._cells[idx]
+            w, h = float(cl["w"]), float(cl["h"])
+            nx = max(0.0, min(1.0 - w, fx - d[2]))
+            ny = max(0.0, min(1.0 - h, fy - d[3]))
+            tx, ty = self._snap_targets(exclude_idx=idx)
+            # 检测左、右、中线吸附
+            for cand_x, offset in ((nx, 0.0), (nx + w, -w), (nx + w * 0.5, -w * 0.5)):
+                sx, gx = self._snap_val(cand_x, tx)
+                if gx is not None:
+                    nx = max(0.0, min(1.0 - w, sx + offset))
+                    self._guides_x.append(gx)
+                    break
+            for cand_y, offset in ((ny, 0.0), (ny + h, -h), (ny + h * 0.5, -h * 0.5)):
+                sy, gy = self._snap_val(cand_y, ty)
+                if gy is not None:
+                    ny = max(0.0, min(1.0 - h, sy + offset))
+                    self._guides_y.append(gy)
+                    break
+            cl["x"], cl["y"] = round(nx, 6), round(ny, 6)
         elif d[0] == "resize":
-            cl = self._cells[d[1]]
+            idx = d[1]
+            cl = self._cells[idx]
             w = max(m, min(1 - cl["x"], fx - cl["x"]))
             h = w * d[2]
             if cl["y"] + h > 1:
                 h = 1 - cl["y"]
                 w = h / d[2]
             cl["w"], cl["h"] = w, h
+        elif d[0] in ("cell_corner", "cell_edge"):
+            _, idx, tag = d
+            cl = self._cells[idx]
+            x1, y1 = float(cl["x"]), float(cl["y"])
+            x2, y2 = x1 + float(cl["w"]), y1 + float(cl["h"])
+            tx, ty = self._snap_targets(exclude_idx=idx)
+            if "w" in tag:
+                sx, gx = self._snap_val(max(0.0, min(x2 - m, fx)), tx)
+                x1 = max(0.0, min(x2 - m, sx))
+                if gx:
+                    self._guides_x.append(gx)
+            if "e" in tag:
+                sx, gx = self._snap_val(max(x1 + m, min(1.0, fx)), tx)
+                x2 = max(x1 + m, min(1.0, sx))
+                if gx:
+                    self._guides_x.append(gx)
+            if "n" in tag:
+                sy, gy = self._snap_val(max(0.0, min(y2 - m, fy)), ty)
+                y1 = max(0.0, min(y2 - m, sy))
+                if gy:
+                    self._guides_y.append(gy)
+            if "s" in tag:
+                sy, gy = self._snap_val(max(y1 + m, min(1.0, fy)), ty)
+                y2 = max(y1 + m, min(1.0, sy))
+                if gy:
+                    self._guides_y.append(gy)
+            cl["x"], cl["y"] = round(x1, 6), round(y1, 6)
+            cl["w"], cl["h"] = round(max(m, x2 - x1), 6), round(max(m, y2 - y1), 6)
         elif d[0] == "edge":
             _, axis, before_idxs, after_idxs = d
             pos, size = ("x", "w") if axis == "x" else ("y", "h")
@@ -651,10 +825,16 @@ class CanvasView(QWidget):
             lo = max([cl[pos] + m for cl in before] + [0.0])
             hi = min([cl[pos] + cl[size] - m for cl in after] + [1.0])
             v = max(lo, min(hi, v))
-            if v < 0.012 and lo <= 0.0:         # 拖回画布边缘时自动吸附
-                v = 0.0
-            elif v > 0.988 and hi >= 1.0:
-                v = 1.0
+            # 共享边拖拽也支持智能辅助线吸附（0 / 25% / 1/3 / 50% / 2/3 / 75% / 100% 及其他边）
+            T = 1.0 / 3.0
+            std_t = [(0.0, "0%"), (0.25, "25%"), (T, "1/3"), (0.5, "50%"), (2.0 * T, "2/3"), (0.75, "75%"), (1.0, "100%")]
+            sv, g_hit = self._snap_val(v, std_t, tol=0.014)
+            if lo <= sv <= hi and g_hit is not None:
+                v = sv
+                if axis == "x":
+                    self._guides_x.append(g_hit)
+                else:
+                    self._guides_y.append(g_hit)
             for cl in before:
                 cl[size] = v - cl[pos]
             for cl in after:
@@ -665,6 +845,9 @@ class CanvasView(QWidget):
 
     def mouseReleaseEvent(self, e):
         self._drag = None
+        if self._guides_x or self._guides_y:
+            self._guides_x, self._guides_y = [], []
+            self.update()
 
 
 class ScreenPicker(QWidget):
@@ -1857,12 +2040,12 @@ class DuetPreviewPlayer(QObject):
 
 
 class LayoutPickerDialog(QDialog):
-    """新建模板时选择版式：常用 / 多格 / 画中画。"""
+    """新建模板时选择版式：平行分屏 / 不平行与斜线 / 画中画 / 🛠️ 自定义生成版式。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("选择画面版式")
-        self.resize(520, 460)
+        self.setWindowTitle("选择或自定义画面版式")
+        self.resize(660, 540)
         self.result_cells = None
         self.result_name = ""
         v = QVBoxLayout(self)
@@ -1874,19 +2057,24 @@ class LayoutPickerDialog(QDialog):
         for tab, items in groups.items():
             lw = QListWidget()
             lw.setViewMode(QListWidget.ViewMode.IconMode)
-            lw.setIconSize(QSize(54, 96))
-            lw.setGridSize(QSize(150, 140))
+            lw.setIconSize(QSize(58, 102))
+            lw.setGridSize(QSize(152, 144))
             lw.setResizeMode(QListWidget.ResizeMode.Adjust)
             lw.setMovement(QListWidget.Movement.Static)
             for name, cells in items:
-                it = QListWidgetItem(template_icon(template_from_cells(name, cells)), name)
+                it = QListWidgetItem(template_icon(template_from_cells(name, cells), 58, 102), name)
                 it.setData(Qt.ItemDataRole.UserRole, (name, cells))
                 lw.addItem(it)
             lw.itemDoubleClicked.connect(lambda *_: self._accept())
             self.tabs.addTab(lw, tab)
             self._lists.append(lw)
+
+        # 第 4 个标签页：🛠️ 自定义生成版式
+        self.custom_tab = self._build_custom_tab()
+        self.tabs.addTab(self.custom_tab, "🛠️ 自定义生成版式")
+
         v.addWidget(self.tabs, 1)
-        tip = QLabel("格子里的数字：1 = 主视频，2/3/4/5 = 人物视频1/2/3/4。创建后可在右侧修改每个格子放哪个视频。")
+        tip = QLabel("格子里的数字：1 = 主视频，2~13 = 人物视频1~12。创建后可在画布自由添加/拆分/删除方框、拖拽调节大小位置（带智能对齐辅助线），并可随时指定任意板块为主视频。")
         tip.setWordWrap(True)
         tip.setStyleSheet("color:#718096;")
         v.addWidget(tip)
@@ -1895,11 +2083,258 @@ class LayoutPickerDialog(QDialog):
         bb.rejected.connect(self.reject)
         v.addWidget(bb)
 
+    def _build_custom_tab(self):
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(16)
+
+        left = QVBoxLayout()
+        f_top = QFormLayout()
+        self.cmb_c_type = QComboBox()
+        self.cmb_c_type.addItem("1. 平行分屏（按每行几格自由组合，最常用）", "parallel")
+        self.cmb_c_type.addItem("2. 不平行 / 错位与斜线分屏（可自由加框/调线）", "non_parallel")
+        self.cmb_c_type.addItem("3. 画中画（背景 + 自定义数量小窗口）", "pip")
+        self.cmb_c_type.currentIndexChanged.connect(self._on_custom_type_changed)
+        f_top.addRow("排版分类:", self.cmb_c_type)
+        left.addLayout(f_top)
+
+        self.c_stack = QStackedWidget()
+
+        # Page 0: 平行分屏（按行配置）
+        p_par = QGroupBox("📐 平行分屏：设置行数与每行板块数")
+        vp = QVBoxLayout(p_par)
+        r_row = QHBoxLayout()
+        r_row.addWidget(QLabel("总行数 (1~5 行):"))
+        self.spin_c_rows = QSpinBox()
+        self.spin_c_rows.setRange(1, 5)
+        self.spin_c_rows.setValue(3)
+        self.spin_c_rows.valueChanged.connect(self._update_custom_rows_ui)
+        r_row.addWidget(self.spin_c_rows)
+        r_row.addStretch()
+        vp.addLayout(r_row)
+
+        self._row_widgets = []
+        default_cols = [1, 3, 3, 3, 2]
+        default_hs = [50, 25, 25, 20, 20]
+        for i in range(5):
+            rw = QWidget()
+            rh = QHBoxLayout(rw)
+            rh.setContentsMargins(0, 2, 0, 2)
+            rh.addWidget(QLabel(f"第 {i + 1} 行:"))
+            sp_c = QSpinBox()
+            sp_c.setRange(1, 6)
+            sp_c.setValue(default_cols[i])
+            sp_c.setSuffix(" 格")
+            sp_c.valueChanged.connect(self._rebuild_custom_preview)
+            rh.addWidget(sp_c)
+            rh.addSpacing(8)
+            rh.addWidget(QLabel("高度占比:"))
+            sp_h = QSpinBox()
+            sp_h.setRange(10, 100)
+            sp_h.setSingleStep(5)
+            sp_h.setValue(default_hs[i])
+            sp_h.setSuffix(" %")
+            sp_h.valueChanged.connect(self._rebuild_custom_preview)
+            rh.addWidget(sp_h)
+            rh.addStretch()
+            vp.addWidget(rw)
+            self._row_widgets.append((rw, sp_c, sp_h))
+        vp.addStretch()
+        self.c_stack.addWidget(p_par)
+
+        # Page 1: 不平行 / 错位与斜线
+        p_non = QGroupBox("⚡ 不平行 / 错位与斜线分屏")
+        fn = QFormLayout(p_non)
+        self.cmb_non_style = QComboBox()
+        self.cmb_non_style.addItem("错位拼接：左 N 格 + 中主区 + 右 N 格 + 底部 M 格", "stagger_center")
+        self.cmb_non_style.addItem("错位拼接：左 N 格 + 右主区 + 底部 M 格", "stagger_right")
+        self.cmb_non_style.addItem("斜线分屏：自定义左右斜线起点与终点高度", "diagonal")
+        self.cmb_non_style.currentIndexChanged.connect(self._rebuild_custom_preview)
+        fn.addRow("起始结构:", self.cmb_non_style)
+        self.spin_non_side = QSpinBox()
+        self.spin_non_side.setRange(1, 4)
+        self.spin_non_side.setValue(2)
+        self.spin_non_side.setSuffix(" 格")
+        self.spin_non_side.valueChanged.connect(self._rebuild_custom_preview)
+        fn.addRow("侧边每列格数:", self.spin_non_side)
+        self.spin_non_bot = QSpinBox()
+        self.spin_non_bot.setRange(0, 4)
+        self.spin_non_bot.setValue(2)
+        self.spin_non_bot.setSuffix(" 格")
+        self.spin_non_bot.valueChanged.connect(self._rebuild_custom_preview)
+        fn.addRow("底部横排格数:", self.spin_non_bot)
+        self.c_stack.addWidget(p_non)
+
+        # Page 2: 画中画
+        p_pip = QGroupBox("🖼️ 画中画：背景 + 多个悬浮小窗口")
+        fp = QFormLayout(p_pip)
+        self.cmb_pip_bg = QComboBox()
+        self.cmb_pip_bg.addItem("全屏单背景 (1格背景)", "full")
+        self.cmb_pip_bg.addItem("上下双分屏背景 (2格背景)", "tb")
+        self.cmb_pip_bg.addItem("左右双分屏背景 (2格背景)", "lr")
+        self.cmb_pip_bg.currentIndexChanged.connect(self._rebuild_custom_preview)
+        fp.addRow("底层背景:", self.cmb_pip_bg)
+        self.spin_pip_cnt = QSpinBox()
+        self.spin_pip_cnt.setRange(1, 8)
+        self.spin_pip_cnt.setValue(2)
+        self.spin_pip_cnt.setSuffix(" 个小窗")
+        self.spin_pip_cnt.valueChanged.connect(self._rebuild_custom_preview)
+        fp.addRow("添加小窗口数:", self.spin_pip_cnt)
+        self.c_stack.addWidget(p_pip)
+
+        left.addWidget(self.c_stack, 1)
+
+        f_bot = QFormLayout()
+        self.cmb_c_viral = QComboBox()
+        self.cmb_c_viral.currentIndexChanged.connect(self._on_viral_slot_changed)
+        f_bot.addRow("⭐ 哪个板块是主视频:", self.cmb_c_viral)
+        left.addLayout(f_bot)
+        lay.addLayout(left, 1)
+
+        # 右侧：实时缩略预览
+        right = QVBoxLayout()
+        lbl_t = QLabel("👁 实时版式预览")
+        lbl_t.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_t.setStyleSheet("font-weight:bold; color:#3182CE;")
+        right.addWidget(lbl_t)
+        self.lbl_c_prev = QLabel()
+        self.lbl_c_prev.setFixedSize(162, 288)
+        self.lbl_c_prev.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_c_prev.setStyleSheet("border: 1px solid #4A5568; border-radius: 6px; background:#1A202C;")
+        right.addWidget(self.lbl_c_prev, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.lbl_c_summary = QLabel("")
+        self.lbl_c_summary.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_c_summary.setWordWrap(True)
+        self.lbl_c_summary.setStyleSheet("color:#A0AEC0; font-size:12px;")
+        right.addWidget(self.lbl_c_summary)
+        right.addStretch()
+        lay.addLayout(right)
+
+        self._custom_cells = []
+        self._custom_name = "自定义版式"
+        self._update_custom_rows_ui()
+        return w
+
+    def _on_custom_type_changed(self, idx):
+        self.c_stack.setCurrentIndex(idx)
+        self._rebuild_custom_preview()
+
+    def _update_custom_rows_ui(self):
+        n = self.spin_c_rows.value()
+        for i, (rw, _, _) in enumerate(self._row_widgets):
+            rw.setVisible(i < n)
+        self._rebuild_custom_preview()
+
+    def _generate_raw_custom_cells(self, viral_idx: int = 0):
+        mode = self.cmb_c_type.currentData()
+        if mode == "parallel":
+            n_rows = self.spin_c_rows.value()
+            cols = [self._row_widgets[i][1].value() for i in range(n_rows)]
+            hs = [float(self._row_widgets[i][2].value()) for i in range(n_rows)]
+            desc = "/".join(str(c) for c in cols)
+            name = f"自定义平行·{sum(cols)}格({desc})"
+            cells = make_row_grid_cells(cols, hs, viral_index=viral_idx)
+            return name, cells
+        elif mode == "non_parallel":
+            st = self.cmb_non_style.currentData()
+            side_n = self.spin_non_side.value()
+            bot_n = self.spin_non_bot.value()
+            if st == "diagonal":
+                cells = make_diag_cells("viral", "person", 0.745, 0.255)
+                auto_assign_cell_sources(cells, viral_idx=viral_idx)
+                return "自定义斜线分屏", cells
+            top_h = 0.68 if bot_n > 0 else 1.0
+            cells = []
+            if st == "stagger_center":
+                sh = top_h / side_n
+                for i in range(side_n):
+                    cells.append(make_cell("person", 0.0, round(i * sh, 6), 0.25, round(sh, 6)))
+                cells.append(make_cell("viral", 0.25, 0.0, 0.50, round(top_h, 6)))
+                for i in range(side_n):
+                    cells.append(make_cell("person", 0.75, round(i * sh, 6), 0.25, round(sh, 6)))
+            else:
+                sh = top_h / side_n
+                for i in range(side_n):
+                    cells.append(make_cell("person", 0.0, round(i * sh, 6), 0.36, round(sh, 6)))
+                cells.append(make_cell("viral", 0.36, 0.0, 0.64, round(top_h, 6)))
+            if bot_n > 0:
+                bw = 1.0 / bot_n
+                bh = 1.0 - top_h
+                for i in range(bot_n):
+                    cells.append(make_cell("person", round(i * bw, 6), round(top_h, 6), round(bw, 6), round(bh, 6)))
+            auto_assign_cell_sources(cells, viral_idx=viral_idx)
+            return f"自定义错位·{len(cells)}格", cells
+        else:
+            bg = self.cmb_pip_bg.currentData()
+            n_pip = self.spin_pip_cnt.value()
+            cells = []
+            if bg == "full":
+                cells.append(make_cell("viral", 0.0, 0.0, 1.0, 1.0))
+            elif bg == "tb":
+                cells.append(make_cell("viral", 0.0, 0.0, 1.0, 0.5))
+                cells.append(make_cell("person", 0.0, 0.5, 1.0, 0.5))
+            else:
+                cells.append(make_cell("viral", 0.0, 0.0, 0.5, 1.0))
+                cells.append(make_cell("person", 0.5, 0.0, 0.5, 1.0))
+            cols = min(4, n_pip)
+            pw = min(0.28, (0.92 - 0.02 * (cols - 1)) / max(1, cols))
+            for i in range(n_pip):
+                r_i = i // 4
+                c_i = i % cols
+                px = 0.04 + c_i * (pw + 0.02)
+                py = 0.64 - r_i * (pw + 0.04)
+                cells.append(make_cell("person", round(px, 4), round(max(0.05, py), 4), round(pw, 4), round(pw, 4), pip=True, border=6))
+            auto_assign_cell_sources(cells, viral_idx=viral_idx)
+            return f"自定义画中画·{len(cells)}格", cells
+
+    def _rebuild_custom_preview(self):
+        cur_v = max(0, self.cmb_c_viral.currentIndex()) if self.cmb_c_viral.count() > 0 else 0
+        name, cells = self._generate_raw_custom_cells(viral_idx=cur_v)
+        n_cells = len(cells)
+        cur_v = max(0, min(cur_v, n_cells - 1))
+        auto_assign_cell_sources(cells, viral_idx=cur_v)
+        self._custom_name = name
+        self._custom_cells = cells
+
+        self.cmb_c_viral.blockSignals(True)
+        self.cmb_c_viral.clear()
+        for i in range(n_cells):
+            kind = "小窗" if cells[i].get("pip") else "板块"
+            self.cmb_c_viral.addItem(f"第 {i + 1} 个{kind} 设为主视频", i)
+        self.cmb_c_viral.setCurrentIndex(cur_v)
+        self.cmb_c_viral.blockSignals(False)
+
+        self._render_custom_thumb()
+
+    def _on_viral_slot_changed(self, idx):
+        if idx < 0 or not self._custom_cells:
+            return
+        auto_assign_cell_sources(self._custom_cells, viral_idx=idx)
+        self._render_custom_thumb()
+
+    def _render_custom_thumb(self):
+        tpl = template_from_cells(self._custom_name, self._custom_cells)
+        ic = template_icon(tpl, 156, 278)
+        self.lbl_c_prev.setPixmap(ic.pixmap(156, 278))
+        n_total = len(self._custom_cells)
+        self.lbl_c_summary.setText(f"共 {n_total} 个板块\n（1个主视频 + {max(0, n_total - 1)}个人物视频）\n保存后时间线将自动显示 {n_total} 列视频")
+
     def _accept(self):
-        lw = self._lists[self.tabs.currentIndex()]
+        idx = self.tabs.currentIndex()
+        if idx == len(self._lists):
+            # 自定义生成版式标签页
+            if not self._custom_cells:
+                self._rebuild_custom_preview()
+            self.result_name = self._custom_name
+            import copy
+            self.result_cells = copy.deepcopy(self._custom_cells)
+            self.accept()
+            return
+        lw = self._lists[idx]
         it = lw.currentItem()
         if it is None:
-            QMessageBox.information(self, "提示", "请先选择一个版式。")
+            QMessageBox.information(self, "提示", "请先选择一个版式，或切换到「🛠️ 自定义生成版式」标签页。")
             return
         self.result_name, self.result_cells = it.data(Qt.ItemDataRole.UserRole)
         self.accept()
@@ -2118,6 +2553,15 @@ class CardEditor(QWidget):
         self.lbl_font_file.setStyleSheet("color:#718096;")
         g.addRow("", self.lbl_font_file)
         self._add(g, "size", "spin", "字号", rng=(6, 400))
+        self._add(g, "auto_size", "check", "根据字数自动缩放字号（不超过指定行数且尽量铺满限定宽度）")
+        self._add(g, "max_lines", "spin", "自动缩放最大行数", rng=(1, 12))
+        self._add(g, "max_size", "spin", "自动缩放最大字号上限", rng=(10, 400))
+        self._add(g, "min_size", "spin", "自动缩放最小字号下限", rng=(6, 200))
+        self.w["auto_size"].setToolTip("开启后：根据文案字数自动增大或缩小字号，使总行数不超过「最大行数」且每行尽量贴近「限定宽度」（让末行字数更均匀）；文案极短时字号不会超过「最大字号上限」（可只显示1行或2行）")
+        self.w["max_lines"].setToolTip("允许自动换行的最大行数（例如设为 3 行，则文案自动缩放以不超过 3 行）")
+        self.w["max_size"].setToolTip("当文案字数很少时，字号最多放大到该上限，不会为了硬凑满行数而把几个字放大到夸张尺寸")
+        self.w["min_size"].setToolTip("当文案字数非常多时，字号最小缩放到该下限")
+        self.w["auto_size"].toggled.connect(self._update_enabled)
         self._add(g, "bold", "check", "加粗 (B)")
         self._add(g, "italic", "check", "斜体 (I)")
         self._add(g, "uppercase", "check", "英文自动转大写 (A-Z)")
@@ -2346,6 +2790,11 @@ class CardEditor(QWidget):
         snap = self.w["snap_split"].isChecked()
         self.w["pos_x"].setEnabled(not snap)
         self.w["pos_y"].setEnabled(not snap)
+        if "auto_size" in self.w:
+            auto_sz = self.w["auto_size"].isChecked()
+            for k in ("max_lines", "max_size", "min_size"):
+                if k in self.w:
+                    self.w[k].setEnabled(auto_sz)
 
     # ---- 读写 ----
     def get_cfg(self):
@@ -2953,8 +3402,8 @@ class DuetVideoUI(QWidget):
             self.templates = [default_template()]
             _save_json("templates.json", self.templates)
         self.settings = _load_json("settings.json", {})
-        if not self.settings.get("layout_presets_v6"):
-            # 升级：把斜线分屏 / 多格 / 画中画版式增量加入模板库
+        if not self.settings.get("layout_presets_v7"):
+            # 升级：把平行分屏 / 不平行与斜线 / 画中画版式增量加入模板库
             names = {t["name"] for t in self.templates}
             diag_added = []
             for tab, name, cells in LAYOUT_PRESETS:
@@ -2968,12 +3417,9 @@ class DuetVideoUI(QWidget):
             if diag_added:
                 self.templates = diag_added + self.templates
             _save_json("templates.json", self.templates)
-            self.settings["layout_presets_v1"] = True
-            self.settings["layout_presets_v2"] = True
-            self.settings["layout_presets_v3"] = True
-            self.settings["layout_presets_v4"] = True
-            self.settings["layout_presets_v5"] = True
-            self.settings["layout_presets_v6"] = True
+            for vk in ("layout_presets_v1", "layout_presets_v2", "layout_presets_v3",
+                       "layout_presets_v4", "layout_presets_v5", "layout_presets_v6", "layout_presets_v7"):
+                self.settings[vk] = True
             _save_json("settings.json", self.settings)
         set_cache_root(self.settings.get("cache_root", ""))
         set_canvas_aspect(self.settings.get("aspect_ratio", "9:16"))
@@ -3190,20 +3636,36 @@ class DuetVideoUI(QWidget):
         tpl_row.addStretch()
         lay.addLayout(tpl_row)
 
-        lists = QHBoxLayout()
+        lists_scroll = QScrollArea()
+        lists_scroll.setWidgetResizable(True)
+        lists_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        lists_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lists_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        lists_container = QWidget()
+        lists_container.setObjectName("duetListsContainer")
+        lists_container.setStyleSheet("#duetListsContainer { background: transparent; }")
+        lists_scroll.viewport().setAutoFillBackground(False)
+        lists_scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        lists = QHBoxLayout(lists_container)
+        lists.setContentsMargins(0, 0, 0, 0)
+        lists.setSpacing(10)
         self.list_person, p_card = self._video_list_card("👤 人物视频1（较短，将被循环）", "person")
         self.list_viral, v_card = self._video_list_card("🎬 主视频（时长基准）", "viral")
+        v_card.setMinimumWidth(225)
+        p_card.setMinimumWidth(225)
         lists.addWidget(v_card)     # 主视频是时长基准，放在最前面
         lists.addWidget(p_card)
-        # 多格 / 画中画模板需要的额外人物视频列（按当前模板自动显示）
+        # 多格 / 画中画模板需要的额外人物视频列（按当前模板自动显示，支持人物视频2~12）
         self.extra_lists, self.extra_cards = {}, {}
-        for src in ("person2", "person3", "person4"):
+        for src in [s for s in SOURCES if s not in ("viral", "person")]:
             lw, card = self._video_list_card(f"👥 {SRC_LABELS[src]}", src)
+            card.setMinimumWidth(225)
             card.setVisible(False)
             lists.addWidget(card)
             self.extra_lists[src] = lw
             self.extra_cards[src] = card
-        lay.addLayout(lists, 1)
+        lists_scroll.setWidget(lists_container)
+        lay.addWidget(lists_scroll, 1)
 
         # 对齐区
         align_card = _card()
@@ -3360,9 +3822,9 @@ class DuetVideoUI(QWidget):
         return getattr(self, "extra_lists", {}).get(src)
 
     def _needed_person_srcs(self):
-        """当前模板需要的人物视频列（至少需要人物视频1）。"""
+        """当前模板需要的人物视频列（至少需要人物视频1，支持人物视频1~12）。"""
         used = sources_used(self.active_tpl())
-        srcs = [s for s in ("person", "person2", "person3", "person4") if s in used]
+        srcs = [s for s in SOURCES if s != "viral" and s in used]
         return srcs or ["person"]
 
     def _sync_source_lists(self):
@@ -3530,14 +3992,25 @@ class DuetVideoUI(QWidget):
         # 中：画布预览
         mid = _card()
         mv = QVBoxLayout(mid)
-        t = _card_title("👁 模板预览（拖动黄线调整格子边界；画中画小窗可拖动，拖右下角缩放）")
+        t = _card_title("👁 模板预览（拖动黄线或青色手柄调整板块；提供智能对齐辅助线与自动吸附）")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         mv.addWidget(t)
+        mode_bar = QHBoxLayout()
+        self.chk_free_box = QCheckBox("📐 自由移动/缩放单个方框（带智能对齐辅助线）")
+        self.chk_free_box.setToolTip("勾选后：可直接拖动任意方框改变位置，或拖动方框四边/四角独立缩放大小，拖拽时自动显示青色对齐辅助线并吸附边界；不勾选时：拖动公共分割线会联动相邻方框，拖动选中方框四角仍可独立缩放")
+        self.chk_free_box.toggled.connect(self._on_free_box_toggled)
+        mode_bar.addWidget(self.chk_free_box)
+        mode_bar.addStretch()
+        b_snap_all = QPushButton("🧲 一键对齐吸附铺满")
+        b_snap_all.setToolTip("自动吸附消除相邻方框之间的细微缝隙，并对齐到画布边缘与等分线")
+        b_snap_all.clicked.connect(self._tpl_snap_and_fill)
+        mode_bar.addWidget(b_snap_all)
+        mv.addLayout(mode_bar)
         self.tpl_canvas = CanvasView(draggable=True)
         self.tpl_canvas.cellsChanged.connect(self._on_cells_dragged)
         self.tpl_canvas.cellSelected.connect(self._on_canvas_cell_selected)
         mv.addWidget(self.tpl_canvas, 1)
-        self.lbl_tpl_hint = QLabel("浅粉 = 主视频，浅蓝/浅绿/浅橙/浅紫 = 人物视频1/2/3/4。黄线（包括画布四周的外边）都可以拖动，把格子往里收就能留出背景区域。")
+        self.lbl_tpl_hint = QLabel("浅粉 = 主视频，其余色块 = 人物视频1~12。可在右侧自由「➕加方框 / ✂️左右或上下拆分 / ➕加小窗 / ⭐设为主视频」，保存模板后第 1 步将自动显示对应数量的板块列表。")
         self.lbl_tpl_hint.setWordWrap(True)
         self.lbl_tpl_hint.setStyleSheet("color:#718096;")
         mv.addWidget(self.lbl_tpl_hint)
@@ -3576,8 +4049,38 @@ class DuetVideoUI(QWidget):
         form.addRow("选择格子:", self.cmb_cell)
         sv.addLayout(form)
 
-        gb = QGroupBox("🔲 当前格子")
+        gb = QGroupBox("🔲 当前格子与板块操作")
         f = QFormLayout(gb)
+        box_ops1 = QHBoxLayout()
+        b_add_box = QPushButton("➕ 加方框")
+        b_add_box.setToolTip("在画布中添加一个新的视频方框（自动分配下一个人物视频，并开启自由移动/缩放）")
+        b_add_box.clicked.connect(self._tpl_add_box)
+        b_split_h = QPushButton("✂️ 左右拆2格")
+        b_split_h.setToolTip("将当前选中的方框左右平分为 2 个板块")
+        b_split_h.clicked.connect(self._tpl_split_h)
+        b_split_v = QPushButton("✂️ 上下拆2格")
+        b_split_v.setToolTip("将当前选中的方框上下平分为 2 个板块")
+        b_split_v.clicked.connect(self._tpl_split_v)
+        box_ops1.addWidget(b_add_box)
+        box_ops1.addWidget(b_split_h)
+        box_ops1.addWidget(b_split_v)
+        f.addRow(box_ops1)
+
+        box_ops2 = QHBoxLayout()
+        b_add_pip = QPushButton("➕ 加小窗")
+        b_add_pip.setToolTip("添加一个悬浮画中画小窗口")
+        b_add_pip.clicked.connect(self._tpl_add_pip)
+        b_set_viral = QPushButton("⭐ 设为主视频")
+        b_set_viral.setToolTip("将当前选中板块设为主视频，其余板块自动依次编号为人物视频1~N")
+        b_set_viral.clicked.connect(self._tpl_set_as_viral)
+        b_del_box = QPushButton("🗑️ 删此格")
+        b_del_box.setToolTip("删除当前选中的方框或小窗口")
+        b_del_box.clicked.connect(self._tpl_remove_box)
+        box_ops2.addWidget(b_add_pip)
+        box_ops2.addWidget(b_set_viral)
+        box_ops2.addWidget(b_del_box)
+        f.addRow(box_ops2)
+
         self.cmb_cell_src = QComboBox()
         for s in SOURCES:
             self.cmb_cell_src.addItem(SRC_LABELS[s], s)
@@ -3588,6 +4091,21 @@ class DuetVideoUI(QWidget):
             self.cmb_cell_fill.addItem(lbl, k)
         self.cmb_cell_fill.currentIndexChanged.connect(self._on_tpl_param)
         f.addRow("填充规则:", self.cmb_cell_fill)
+        self.cmb_cell_rot = QComboBox()
+        for deg, lbl in ROTATE_MODES:
+            self.cmb_cell_rot.addItem(lbl, deg)
+        self.cmb_cell_rot.currentIndexChanged.connect(self._on_tpl_param)
+        f.addRow("画面旋转:", self.cmb_cell_rot)
+        cell_rot_btns = QHBoxLayout()
+        b_c_ccw = QPushButton("↺ 左转90°")
+        b_c_ccw.setToolTip("当前格子视频逆时针旋转 90°")
+        b_c_ccw.clicked.connect(lambda: self._rotate_tpl_cell(-90))
+        b_c_cw = QPushButton("↻ 右转90°")
+        b_c_cw.setToolTip("当前格子视频顺时针旋转 90°")
+        b_c_cw.clicked.connect(lambda: self._rotate_tpl_cell(90))
+        cell_rot_btns.addWidget(b_c_ccw)
+        cell_rot_btns.addWidget(b_c_cw)
+        f.addRow("", cell_rot_btns)
         self.cell_spins = {}
         for key, lbl, rng, step in (("ox", "画面偏移 X", (-2000, 2000), 10), ("oy", "画面偏移 Y", (-2000, 2000), 10),
                                     ("px", "格子位置 X", (0, CANVAS_W), 10), ("py", "格子位置 Y", (0, CANVAS_H), 10),
@@ -3714,7 +4232,7 @@ class DuetVideoUI(QWidget):
         self._load_tpl_editor()
 
     def _tpl_editor_widgets(self):
-        return [self.cmb_cell, self.cmb_cell_src, self.cmb_cell_fill, self.chk_cell_pip,
+        return [self.cmb_cell, self.cmb_cell_src, self.cmb_cell_fill, self.cmb_cell_rot, self.chk_cell_pip,
                 self.spin_div_w, self.spin_diag_yl, self.spin_diag_yr, *self.cell_spins.values()]
 
     def _load_tpl_editor(self):
@@ -3739,6 +4257,7 @@ class DuetVideoUI(QWidget):
         cl = cells[self._sel_cell]
         self.cmb_cell_src.setCurrentIndex(max(0, self.cmb_cell_src.findData(cl.get("src"))))
         self.cmb_cell_fill.setCurrentIndex(max(0, self.cmb_cell_fill.findData(cl.get("fill", "cover"))))
+        self.cmb_cell_rot.setCurrentIndex(max(0, self.cmb_cell_rot.findData(int(cl.get("rotate", 0) or 0) % 360)))
         x, y, w, h = cell_rect_px(cl, t)
         ref = cl.get("ref_size")
         if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
@@ -3783,6 +4302,11 @@ class DuetVideoUI(QWidget):
             set_tpl_diag_ys(cells, yl, yr)
         cl = cells[self._sel_cell]
         cl["src"] = self.cmb_cell_src.currentData()
+        rot_deg = int(self.cmb_cell_rot.currentData() or 0) % 360
+        if rot_deg:
+            cl["rotate"] = rot_deg
+        else:
+            cl.pop("rotate", None)
         ref = cl.get("ref_size")
         if isinstance(ref, (list, tuple)) and len(ref) == 2 and ref[0] > 0 and ref[1] > 0:
             rw, rh = float(ref[0]), float(ref[1])
@@ -3824,6 +4348,19 @@ class DuetVideoUI(QWidget):
         cells[0]["src"], cells[1]["src"] = cells[1].get("src", "person"), cells[0].get("src", "viral")
         self._load_tpl_editor()
 
+    def _rotate_tpl_cell(self, delta: int):
+        cells = self.edit_tpl.get("cells")
+        if not cells:
+            return
+        cl = cells[self._sel_cell]
+        cur = int(cl.get("rotate", 0) or 0)
+        new_rot = (cur + delta) % 360
+        if new_rot:
+            cl["rotate"] = new_rot
+        else:
+            cl.pop("rotate", None)
+        self._load_tpl_editor()
+
     def _on_tpl_param(self, *a):
         self._read_tpl_editor()
         self._load_tpl_editor()
@@ -3861,11 +4398,142 @@ class DuetVideoUI(QWidget):
     def _on_split_dragged(self, ratio):
         pass
 
+    def _on_free_box_toggled(self, checked: bool):
+        if hasattr(self, "tpl_canvas"):
+            self.tpl_canvas.set_free_box_mode(checked)
+
+    def _next_unused_person_src(self, cells: list = None) -> str:
+        cells = cells if cells is not None else (self.edit_tpl.get("cells") or [])
+        used = {c.get("src") for c in cells}
+        for s in SOURCES:
+            if s != "viral" and s not in used:
+                return s
+        person_srcs = [s for s in SOURCES if s != "viral"]
+        return person_srcs[len(cells) % len(person_srcs)]
+
+    def _tpl_add_box(self):
+        cells = self.edit_tpl.get("cells")
+        if cells is None:
+            return
+        src = self._next_unused_person_src(cells)
+        # 若当前选中的是普通矩形且足够大，优先从当前选中方框下半部或右半部腾出空间，或者新建居中方框
+        new_c = make_cell(src, 0.25, 0.25, 0.50, 0.50, fill="cover")
+        cells.append(new_c)
+        self._sel_cell = len(cells) - 1
+        if hasattr(self, "chk_free_box") and not self.chk_free_box.isChecked():
+            self.chk_free_box.setChecked(True)
+        self._load_tpl_editor()
+
+    def _tpl_split_h(self):
+        """将当前选中的方框左右平分为 2 格。"""
+        cells = self.edit_tpl.get("cells")
+        if not cells or not (0 <= self._sel_cell < len(cells)):
+            return
+        cl = cells[self._sel_cell]
+        if cl.get("poly"):
+            QMessageBox.information(self, "提示", "斜线多边形格子不支持直接矩形拆分，请先切换到普通方框。")
+            return
+        w0 = float(cl.get("w", 0.5))
+        if w0 < 0.10:
+            QMessageBox.information(self, "提示", "当前方框宽度太小，无法继续左右拆分。")
+            return
+        half_w = round(w0 * 0.5, 6)
+        cl["w"] = half_w
+        new_c = make_cell(
+            self._next_unused_person_src(cells),
+            round(float(cl["x"]) + half_w, 6),
+            float(cl["y"]),
+            round(w0 - half_w, 6),
+            float(cl["h"]),
+            fill=cl.get("fill", "cover"),
+            pip=bool(cl.get("pip")),
+            border=int(cl.get("border", 0) or 0),
+        )
+        cells.insert(self._sel_cell + 1, new_c)
+        self._sel_cell += 1
+        self._load_tpl_editor()
+
+    def _tpl_split_v(self):
+        """将当前选中的方框上下平分为 2 格。"""
+        cells = self.edit_tpl.get("cells")
+        if not cells or not (0 <= self._sel_cell < len(cells)):
+            return
+        cl = cells[self._sel_cell]
+        if cl.get("poly"):
+            QMessageBox.information(self, "提示", "斜线多边形格子不支持直接矩形拆分，请先切换到普通方框。")
+            return
+        h0 = float(cl.get("h", 0.5))
+        if h0 < 0.10:
+            QMessageBox.information(self, "提示", "当前方框高度太小，无法继续上下拆分。")
+            return
+        half_h = round(h0 * 0.5, 6)
+        cl["h"] = half_h
+        new_c = make_cell(
+            self._next_unused_person_src(cells),
+            float(cl["x"]),
+            round(float(cl["y"]) + half_h, 6),
+            float(cl["w"]),
+            round(h0 - half_h, 6),
+            fill=cl.get("fill", "cover"),
+            pip=bool(cl.get("pip")),
+            border=int(cl.get("border", 0) or 0),
+        )
+        cells.insert(self._sel_cell + 1, new_c)
+        self._sel_cell += 1
+        self._load_tpl_editor()
+
+    def _tpl_add_pip(self):
+        """添加一个画中画小窗口。"""
+        cells = self.edit_tpl.get("cells")
+        if cells is None:
+            return
+        pips = [c for c in cells if c.get("pip")]
+        n = len(pips)
+        pw = 0.26
+        px = min(0.70, 0.04 + (n % 3) * 0.32)
+        py = max(0.06, 0.62 - (n // 3) * 0.30)
+        new_c = make_cell(self._next_unused_person_src(cells), round(px, 4), round(py, 4), pw, pw, pip=True, border=6)
+        cells.append(new_c)
+        self._sel_cell = len(cells) - 1
+        self._load_tpl_editor()
+
+    def _tpl_set_as_viral(self):
+        """将当前选中的板块设为主视频，其余板块依次自动分配为人物视频1..N。"""
+        cells = self.edit_tpl.get("cells")
+        if not cells or not (0 <= self._sel_cell < len(cells)):
+            return
+        auto_assign_cell_sources(cells, viral_idx=self._sel_cell)
+        self._load_tpl_editor()
+
+    def _tpl_remove_box(self):
+        """删除当前选中的方框。"""
+        cells = self.edit_tpl.get("cells")
+        if not cells:
+            return
+        if len(cells) <= 1:
+            QMessageBox.information(self, "无法删除", "一个模板至少需要保留 1 个视频板块。")
+            return
+        cells.pop(self._sel_cell)
+        if not any(c.get("src") == "viral" for c in cells):
+            cells[0]["src"] = "viral"
+        self._sel_cell = max(0, min(self._sel_cell, len(cells) - 1))
+        self._load_tpl_editor()
+
+    def _tpl_snap_and_fill(self):
+        """一键自动吸附所有矩形方框边缘，消除细微缝隙并对齐到画布边缘与等分线。"""
+        cells = self.edit_tpl.get("cells")
+        if not cells:
+            return
+        snap_and_fill_cells(cells)
+        self._load_tpl_editor()
+
     def redraw_tpl_canvas(self, update_cells=True):
         if not hasattr(self, "tpl_canvas"):
             return
+        sel = getattr(self, "_sel_cell", -1)
+        self.tpl_canvas.set_selected(sel)
         img = compose_preview(self.edit_tpl, self._tpl_frames or {}, show_split=False,
-                              selected=getattr(self, "_sel_cell", -1))
+                              selected=sel)
         self.tpl_canvas.set_image(img)
         if update_cells:
             self.tpl_canvas.set_cells(self.edit_tpl.get("cells"))
@@ -4086,6 +4754,35 @@ class DuetVideoUI(QWidget):
         tr.addWidget(self.btn_preview_title)
         tr.addWidget(self.btn_preview_phone)
         mv.addLayout(tr)
+
+        rot_bar = QHBoxLayout()
+        rot_bar.setSpacing(6)
+        rot_bar.addWidget(QLabel("🔄 旋转视频:"))
+        self.cmb_quick_rot_src = QComboBox()
+        self.cmb_quick_rot_src.setMinimumWidth(100)
+        self.cmb_quick_rot_src.currentIndexChanged.connect(self._on_quick_rot_src_changed)
+        rot_bar.addWidget(self.cmb_quick_rot_src)
+        b_q_ccw = QPushButton("↺ 左转90°")
+        b_q_ccw.setToolTip("将所选视频逆时针旋转 90°（向左转）")
+        b_q_ccw.clicked.connect(lambda: self._rotate_quick(-90))
+        b_q_cw = QPushButton("↻ 右转90°")
+        b_q_cw.setToolTip("将所选视频顺时针旋转 90°（向右转）")
+        b_q_cw.clicked.connect(lambda: self._rotate_quick(90))
+        b_q_180 = QPushButton("⇅ 180°")
+        b_q_180.setToolTip("将所选视频翻转 180°")
+        b_q_180.clicked.connect(lambda: self._rotate_quick(180))
+        self.lbl_quick_rot = QLabel("0°")
+        self.lbl_quick_rot.setStyleSheet("color:#3182CE; font-weight:bold; min-width:34px;")
+        b_q_all = QPushButton("应用到全部任务")
+        b_q_all.setToolTip("将当前所选视频的旋转角度同步应用到列表中的所有任务")
+        b_q_all.clicked.connect(self._apply_rotation_to_all_tasks)
+        rot_bar.addWidget(b_q_ccw)
+        rot_bar.addWidget(b_q_cw)
+        rot_bar.addWidget(b_q_180)
+        rot_bar.addWidget(self.lbl_quick_rot)
+        rot_bar.addStretch(1)
+        rot_bar.addWidget(b_q_all)
+        mv.addLayout(rot_bar)
         self.lbl_preview_tip = QLabel("")
         self.lbl_preview_tip.setStyleSheet("color:#718096;")
         self.lbl_preview_tip.setWordWrap(True)
@@ -4167,6 +4864,23 @@ class DuetVideoUI(QWidget):
         self.cmb_adj_src = QComboBox()
         self.cmb_adj_src.currentIndexChanged.connect(self._load_adj_widgets)
         f.addRow("调整哪个视频:", self.cmb_adj_src)
+        self.cmb_adj_rot = QComboBox()
+        for deg, lbl in ROTATE_MODES:
+            self.cmb_adj_rot.addItem(lbl, deg)
+        self.cmb_adj_rot.currentIndexChanged.connect(self._on_adj_change)
+        f.addRow("画面旋转:", self.cmb_adj_rot)
+        adj_rot_btns = QHBoxLayout()
+        b_a_ccw = QPushButton("↺ 左转90°")
+        b_a_ccw.clicked.connect(lambda: self._rotate_adj_src(-90))
+        b_a_cw = QPushButton("↻ 右转90°")
+        b_a_cw.clicked.connect(lambda: self._rotate_adj_src(90))
+        b_a_all = QPushButton("应用旋转到全部")
+        b_a_all.setToolTip("将当前视频的旋转角度一键应用到所有任务")
+        b_a_all.clicked.connect(self._apply_rotation_to_all_tasks)
+        adj_rot_btns.addWidget(b_a_ccw)
+        adj_rot_btns.addWidget(b_a_cw)
+        adj_rot_btns.addWidget(b_a_all)
+        f.addRow("", adj_rot_btns)
         self.adj_sp = {}
         for k, lbl, rng in (("dx", "X 移动", (-2000, 2000)), ("dy", "Y 移动", (-2000, 2000)),
                             ("scale", "缩放 %", (10, 500))):
@@ -4287,13 +5001,24 @@ class DuetVideoUI(QWidget):
     def _refresh_adj_sources(self):
         if not hasattr(self, "cmb_adj_src"):
             return
+        used = sources_used(self.active_tpl())
         cur = self.cmb_adj_src.currentData()
+        if not cur and "person" in used:
+            cur = "person"
         self.cmb_adj_src.blockSignals(True)
         self.cmb_adj_src.clear()
-        for s in sources_used(self.active_tpl()):
+        for s in used:
             self.cmb_adj_src.addItem(SRC_LABELS[s], s)
         self.cmb_adj_src.setCurrentIndex(max(0, self.cmb_adj_src.findData(cur)))
         self.cmb_adj_src.blockSignals(False)
+        if hasattr(self, "cmb_quick_rot_src"):
+            qcur = self.cmb_quick_rot_src.currentData() or ("person" if "person" in used else cur)
+            self.cmb_quick_rot_src.blockSignals(True)
+            self.cmb_quick_rot_src.clear()
+            for s in used:
+                self.cmb_quick_rot_src.addItem(SRC_LABELS[s], s)
+            self.cmb_quick_rot_src.setCurrentIndex(max(0, self.cmb_quick_rot_src.findData(qcur)))
+            self.cmb_quick_rot_src.blockSignals(False)
         self._load_adj_widgets()
         self._refresh_replace_rows()
 
@@ -4334,6 +5059,16 @@ class DuetVideoUI(QWidget):
             f_lbl.setMinimumWidth(60)
             f_lbl.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             hl.addWidget(f_lbl, 1)
+            b_rot_l = QPushButton("↺")
+            b_rot_l.setFixedWidth(30)
+            b_rot_l.setToolTip(f"将「{SRC_LABELS[s]}」向左逆时针旋转 90°")
+            b_rot_l.clicked.connect(lambda _, x=s: self._rotate_task_video(x, -90))
+            b_rot_r = QPushButton("↻")
+            b_rot_r.setFixedWidth(30)
+            b_rot_r.setToolTip(f"将「{SRC_LABELS[s]}」向右顺时针旋转 90°")
+            b_rot_r.clicked.connect(lambda _, x=s: self._rotate_task_video(x, 90))
+            hl.addWidget(b_rot_l)
+            hl.addWidget(b_rot_r)
             b = QPushButton("替换…" if info else "添加…")
             b.setToolTip(f"为第 {self.cur_task + 1} 组任务重新选择「{SRC_LABELS[s]}」")
             b.clicked.connect(lambda _, x=s: self._replace_task_video(x))
@@ -4497,6 +5232,73 @@ class DuetVideoUI(QWidget):
             sp.blockSignals(True)
             sp.setValue(int(vals.get(k, 100 if k == "scale" else 0)))
             sp.blockSignals(False)
+        if hasattr(self, "cmb_adj_rot"):
+            rot_deg = int(vals.get("rotate", 0) or 0) % 360
+            self.cmb_adj_rot.blockSignals(True)
+            self.cmb_adj_rot.setCurrentIndex(max(0, self.cmb_adj_rot.findData(rot_deg)))
+            self.cmb_adj_rot.blockSignals(False)
+        self._update_quick_rot_label()
+
+    def _update_quick_rot_label(self):
+        if not hasattr(self, "lbl_quick_rot") or not hasattr(self, "cmb_quick_rot_src"):
+            return
+        qsrc = self.cmb_quick_rot_src.currentData()
+        rot_deg = 0
+        if self.tasks and qsrc:
+            rot_deg = int(self.tasks[self.cur_task].setdefault("adj", {}).get(qsrc, {}).get("rotate", 0) or 0) % 360
+        self.lbl_quick_rot.setText(f"{rot_deg}°")
+
+    def _on_quick_rot_src_changed(self, *a):
+        qsrc = self.cmb_quick_rot_src.currentData()
+        if qsrc and hasattr(self, "cmb_adj_src"):
+            idx = self.cmb_adj_src.findData(qsrc)
+            if idx >= 0 and self.cmb_adj_src.currentIndex() != idx:
+                self.cmb_adj_src.setCurrentIndex(idx)
+        self._update_quick_rot_label()
+
+    def _rotate_task_video(self, src: str, delta: int):
+        if not self.tasks or not src:
+            return
+        t = self.tasks[self.cur_task]
+        d = t.setdefault("adj", {}).setdefault(src, {})
+        cur = int(d.get("rotate", 0) or 0)
+        d["rotate"] = (cur + delta) % 360
+        for cmb in (getattr(self, "cmb_adj_src", None), getattr(self, "cmb_quick_rot_src", None)):
+            if cmb is not None:
+                idx = cmb.findData(src)
+                if idx >= 0 and cmb.currentIndex() != idx:
+                    cmb.blockSignals(True)
+                    cmb.setCurrentIndex(idx)
+                    cmb.blockSignals(False)
+        self._load_adj_widgets()
+        self.redraw_preview()
+        self.save_settings()
+
+    def _rotate_quick(self, delta: int):
+        src = self.cmb_quick_rot_src.currentData() if hasattr(self, "cmb_quick_rot_src") else None
+        if not src and hasattr(self, "cmb_adj_src"):
+            src = self.cmb_adj_src.currentData()
+        self._rotate_task_video(src or "person", delta)
+
+    def _rotate_adj_src(self, delta: int):
+        src = self.cmb_adj_src.currentData() if hasattr(self, "cmb_adj_src") else "person"
+        self._rotate_task_video(src or "person", delta)
+
+    def _apply_rotation_to_all_tasks(self):
+        if not self.tasks:
+            return
+        src = (self.cmb_quick_rot_src.currentData() if hasattr(self, "cmb_quick_rot_src") else None) or \
+              (self.cmb_adj_src.currentData() if hasattr(self, "cmb_adj_src") else "person")
+        cur_t = self.tasks[self.cur_task]
+        rot_deg = int(cur_t.setdefault("adj", {}).get(src, {}).get("rotate", 0) or 0) % 360
+        for t in self.tasks:
+            d = t.setdefault("adj", {}).setdefault(src, {})
+            d["rotate"] = rot_deg
+        self.save_settings()
+        QMessageBox.information(
+            self, "已应用到全部任务",
+            f"已将「{SRC_LABELS.get(src, src)}」的旋转角度（{rot_deg}°）同步应用到全部 {len(self.tasks)} 个任务。"
+        )
 
     def _on_adj_change(self, *a):
         src = self.cmb_adj_src.currentData()
@@ -4506,6 +5308,9 @@ class DuetVideoUI(QWidget):
         d = t.setdefault("adj", {}).setdefault(src, {})
         for k, sp in self.adj_sp.items():
             d[k] = sp.value()
+        if hasattr(self, "cmb_adj_rot"):
+            d["rotate"] = int(self.cmb_adj_rot.currentData() or 0) % 360
+        self._update_quick_rot_label()
         self.redraw_preview()
 
     def _reset_adj(self):
@@ -5341,6 +6146,7 @@ class DuetVideoUI(QWidget):
             "layout_presets_v4": True,
             "layout_presets_v5": True,
             "layout_presets_v6": True,
+            "layout_presets_v7": True,
         }
         prefs.update({k: state[k] for k in self._PREF_KEYS})
         if not has_proj:
